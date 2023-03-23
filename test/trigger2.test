@@ -49,6 +49,7 @@
 
 set testdir [file dirname $argv0]
 source $testdir/tester.tcl
+set testprefix trigger2
 ifcapable {!trigger} {
   finish_test
   return
@@ -752,8 +753,41 @@ do_test trigger2-9.1 {
   }
 } {}
 
+integrity_check trigger2-9.99
+
+# 2019-11-02 Problem found by TH3, related to generated column support.
+db close
+sqlite3 db :memory:
+do_execsql_test trigger2-10.1 {
+  CREATE TABLE t1(a,b,c,d);
+  CREATE VIEW v2(a,b,c,d) AS SELECT * FROM t1;
+  CREATE TRIGGER v2ins INSTEAD OF INSERT ON v2 BEGIN
+    INSERT INTO t1(a,b,c,d) VALUES(new.a, new.b, new.c, new.d);
+  END;
+  INSERT INTO v2(a,d) VALUES(11,14);
+  SELECT * FROM t1;
+} {11 {} {} 14}
+ 
 } ;# ifcapable view
 
-integrity_check trigger2-9.9
+#-------------------------------------------------------------------------
+reset_db
+do_execsql_test 11.1 {
+  CREATE TABLE t1(a INT PRIMARY KEY, b, c REAL, d, e);
+  CREATE TABLE t2(a INT, b, c REAL, d, e, PRIMARY KEY(a,b)) WITHOUT ROWID;
+  CREATE UNIQUE INDEX t2c ON t2(c);
+  CREATE UNIQUE INDEX t2d ON t2(d);
+  CREATE UNIQUE INDEX t2e ON t2(e);
+}
+
+do_catchsql_test 11.2 {
+  CREATE TRIGGER r1 BEFORE INSERT ON t1 BEGIN
+    INSERT INTO t2(a,b,c,d,e) VALUES(91,NULL,93,94,?1)
+      ON CONFLICT(b,a) DO NOTHING
+      ON CONFLICT DO UPDATE SET b=?1;
+  END;
+} {1 {trigger cannot use variables}}
+
 
 finish_test
+

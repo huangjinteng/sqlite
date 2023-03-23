@@ -32,7 +32,7 @@ extern const char *sqlite3ErrName(int);
 */
 typedef struct Thread Thread;
 struct Thread {
-  /* The first group of fields are writable by the master and read-only
+  /* The first group of fields are writable by the leader and read-only
   ** to the thread. */
   char *zFilename;       /* Name of database file */
   void (*xOp)(Thread*);  /* next operation to do */
@@ -41,7 +41,7 @@ struct Thread {
   int busy;              /* True if this thread is in use */
 
   /* The next group of fields are writable by the thread but read-only to the
-  ** master. */
+  ** leader. */
   int completed;        /* Number of operations completed */
   sqlite3 *db;           /* Open database */
   sqlite3_stmt *pStmt;     /* Pending operation */
@@ -60,6 +60,11 @@ struct Thread {
 #define N_THREAD 26
 static Thread threadset[N_THREAD];
 
+static void test_barrier(){
+  sqlite3_mutex *pMutex = sqlite3_mutex_alloc(SQLITE_MUTEX_STATIC_APP1);
+  sqlite3_mutex_enter(pMutex);
+  sqlite3_mutex_leave(pMutex);
+}
 
 /*
 ** The main loop for a thread.  Threads use busy waiting. 
@@ -76,16 +81,20 @@ static void *test_thread_main(void *pArg){
     p->db = 0;
   }
   p->pStmt = 0;
+  test_barrier();
   p->completed = 1;
   while( p->opnum<=p->completed ) sched_yield();
+  test_barrier();
   while( p->xOp ){
     if( p->zErr && p->zErr!=p->zStaticErr ){
       sqlite3_free(p->zErr);
       p->zErr = 0;
     }
     (*p->xOp)(p);
+    test_barrier();
     p->completed++;
     while( p->opnum<=p->completed ) sched_yield();
+    test_barrier();
   }
   if( p->pStmt ){
     sqlite3_finalize(p->pStmt);
@@ -99,6 +108,7 @@ static void *test_thread_main(void *pArg){
     sqlite3_free(p->zErr);
     p->zErr = 0;
   }
+  test_barrier();
   p->completed++;
 #ifndef SQLITE_OMIT_DEPRECATED
   sqlite3_thread_cleanup();
@@ -166,7 +176,9 @@ static int SQLITE_TCLAPI tcl_thread_create(
 ** Wait for a thread to reach its idle state.
 */
 static void test_thread_wait(Thread *p){
+  test_barrier();
   while( p->opnum>p->completed ) sched_yield();
+  test_barrier();
 }
 
 /*
@@ -456,6 +468,7 @@ static int SQLITE_TCLAPI tcl_thread_compile(
   threadset[i].xOp = do_compile;
   sqlite3_free(threadset[i].zArg);
   threadset[i].zArg = sqlite3_mprintf("%s", argv[2]);
+  test_barrier();
   threadset[i].opnum++;
   return TCL_OK;
 }
@@ -507,6 +520,7 @@ static int SQLITE_TCLAPI tcl_thread_step(
   }
   test_thread_wait(&threadset[i]);
   threadset[i].xOp = do_step;
+  test_barrier();
   threadset[i].opnum++;
   return TCL_OK;
 }
@@ -551,6 +565,7 @@ static int SQLITE_TCLAPI tcl_thread_finalize(
   threadset[i].xOp = do_finalize;
   sqlite3_free(threadset[i].zArg);
   threadset[i].zArg = 0;
+  test_barrier();
   threadset[i].opnum++;
   return TCL_OK;
 }

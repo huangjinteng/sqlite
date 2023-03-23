@@ -485,6 +485,9 @@ static int tvfsLock(sqlite3_file *pFile, int eLock){
     tvfsExecTcl(p, "xLock", Tcl_NewStringObj(pFd->zFilename, -1), 
                    Tcl_NewStringObj(zLock, -1), 0, 0);
   }
+  if( p->mask&TESTVFS_LOCK_MASK && tvfsInjectIoerr(p) ){
+    return SQLITE_IOERR_LOCK;
+  }
   return sqlite3OsLock(pFd->pReal, eLock);
 }
 
@@ -500,7 +503,7 @@ static int tvfsUnlock(sqlite3_file *pFile, int eLock){
     tvfsExecTcl(p, "xUnlock", Tcl_NewStringObj(pFd->zFilename, -1), 
                    Tcl_NewStringObj(zLock, -1), 0, 0);
   }
-  if( p->mask&TESTVFS_WRITE_MASK && tvfsInjectIoerr(p) ){
+  if( p->mask&TESTVFS_UNLOCK_MASK && tvfsInjectIoerr(p) ){
     return SQLITE_IOERR_UNLOCK;
   }
   return sqlite3OsUnlock(pFd->pReal, eLock);
@@ -895,7 +898,8 @@ static int tvfsShmMap(
   Testvfs *p = (Testvfs *)(pFd->pVfs->pAppData);
 
   if( p->isFullshm ){
-    return sqlite3OsShmMap(pFd->pReal, iPage, pgsz, isWrite, pp);
+    sqlite3_file *pReal = pFd->pReal;
+    return pReal->pMethods->xShmMap(pReal, iPage, pgsz, isWrite, pp);
   }
 
   if( 0==pFd->pShm ){
@@ -945,7 +949,8 @@ static int tvfsShmLock(
   char zLock[80];
 
   if( p->isFullshm ){
-    return sqlite3OsShmLock(pFd->pReal, ofst, n, flags);
+    sqlite3_file *pReal = pFd->pReal;
+    return pReal->pMethods->xShmLock(pReal, ofst, n, flags);
   }
 
   if( p->pScript && p->mask&TESTVFS_SHMLOCK_MASK ){
@@ -1009,7 +1014,8 @@ static void tvfsShmBarrier(sqlite3_file *pFile){
   }
 
   if( p->isFullshm ){
-    sqlite3OsShmBarrier(pFd->pReal);
+    sqlite3_file *pReal = pFd->pReal;
+    pReal->pMethods->xShmBarrier(pReal);
     return;
   }
 }
@@ -1025,7 +1031,8 @@ static int tvfsShmUnmap(
   TestvfsFd **ppFd;
 
   if( p->isFullshm ){
-    return sqlite3OsShmUnmap(pFd->pReal, deleteFlag);
+    sqlite3_file *pReal = pFd->pReal;
+    return pReal->pMethods->xShmUnmap(pReal, deleteFlag);
   }
 
   if( !pBuffer ) return SQLITE_OK;
@@ -1390,7 +1397,9 @@ static void SQLITE_TCLAPI testvfs_obj_del(ClientData cd){
   Testvfs *p = (Testvfs *)cd;
   if( p->pScript ) Tcl_DecrRefCount(p->pScript);
   sqlite3_vfs_unregister(p->pVfs);
+  memset(p->pVfs, 0, sizeof(sqlite3_vfs));
   ckfree((char *)p->pVfs);
+  memset(p, 0, sizeof(Testvfs));
   ckfree((char *)p);
 }
 

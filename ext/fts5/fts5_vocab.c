@@ -50,6 +50,7 @@ struct Fts5VocabTable {
   sqlite3 *db;                    /* Database handle */
   Fts5Global *pGlobal;            /* FTS5 global object for this database */
   int eType;                      /* FTS5_VOCAB_COL, ROW or INSTANCE */
+  unsigned bBusy;                 /* True if busy */
 };
 
 struct Fts5VocabCursor {
@@ -59,6 +60,7 @@ struct Fts5VocabCursor {
 
   int bEof;                       /* True if this cursor is at EOF */
   Fts5IndexIter *pIter;           /* Term/rowid iterator object */
+  void *pStruct;                  /* From sqlite3Fts5StructureRef() */
 
   int nLeTerm;                    /* Size of zLeTerm in bytes */
   char *zLeTerm;                  /* (term <= $zLeTerm) paramater, or NULL */
@@ -332,6 +334,12 @@ static int fts5VocabOpenMethod(
   sqlite3_stmt *pStmt = 0;
   char *zSql = 0;
 
+  if( pTab->bBusy ){
+    pVTab->zErrMsg = sqlite3_mprintf(
+       "recursive definition for %s.%s", pTab->zFts5Db, pTab->zFts5Tbl
+    );
+    return SQLITE_ERROR;
+  }
   zSql = sqlite3Fts5Mprintf(&rc,
       "SELECT t.%Q FROM %Q.%Q AS t WHERE t.%Q MATCH '*id'",
       pTab->zFts5Tbl, pTab->zFts5Db, pTab->zFts5Tbl, pTab->zFts5Tbl
@@ -343,10 +351,12 @@ static int fts5VocabOpenMethod(
   assert( rc==SQLITE_OK || pStmt==0 );
   if( rc==SQLITE_ERROR ) rc = SQLITE_OK;
 
+  pTab->bBusy = 1;
   if( pStmt && sqlite3_step(pStmt)==SQLITE_ROW ){
     i64 iId = sqlite3_column_int64(pStmt, 0);
     pFts5 = sqlite3Fts5TableFromCsrid(pTab->pGlobal, iId);
   }
+  pTab->bBusy = 0;
 
   if( rc==SQLITE_OK ){
     if( pFts5==0 ){
@@ -364,7 +374,7 @@ static int fts5VocabOpenMethod(
   }
 
   if( rc==SQLITE_OK ){
-    int nByte = pFts5->pConfig->nCol * sizeof(i64)*2 + sizeof(Fts5VocabCursor);
+    i64 nByte = pFts5->pConfig->nCol * sizeof(i64)*2 + sizeof(Fts5VocabCursor);
     pCsr = (Fts5VocabCursor*)sqlite3Fts5MallocZero(&rc, nByte);
   }
 
@@ -384,6 +394,8 @@ static int fts5VocabOpenMethod(
 static void fts5VocabResetCursor(Fts5VocabCursor *pCsr){
   pCsr->rowid = 0;
   sqlite3Fts5IterClose(pCsr->pIter);
+  sqlite3Fts5StructureRelease(pCsr->pStruct);
+  pCsr->pStruct = 0;
   pCsr->pIter = 0;
   sqlite3_free(pCsr->zLeTerm);
   pCsr->nLeTerm = -1;
@@ -461,9 +473,11 @@ static int fts5VocabInstanceNext(Fts5VocabCursor *pCsr){
 static int fts5VocabNextMethod(sqlite3_vtab_cursor *pCursor){
   Fts5VocabCursor *pCsr = (Fts5VocabCursor*)pCursor;
   Fts5VocabTable *pTab = (Fts5VocabTable*)pCursor->pVtab;
-  int rc = SQLITE_OK;
   int nCol = pCsr->pFts5->pConfig->nCol;
+  int rc;
 
+  rc = sqlite3Fts5StructureTest(pCsr->pFts5->pIndex, pCsr->pStruct);
+  if( rc!=SQLITE_OK ) return rc;
   pCsr->rowid++;
 
   if( pTab->eType==FTS5_VOCAB_INSTANCE ){
@@ -573,8 +587,10 @@ static int fts5VocabNextMethod(sqlite3_vtab_cursor *pCursor){
   }
 
   if( rc==SQLITE_OK && pCsr->bEof==0 && pTab->eType==FTS5_VOCAB_COL ){
-    while( pCsr->aDoc[pCsr->iCol]==0 ) pCsr->iCol++;
-    assert( pCsr->iCol<pCsr->pFts5->pConfig->nCol );
+    for(/* noop */; pCsr->iCol<nCol && pCsr->aDoc[pCsr->iCol]==0; pCsr->iCol++);
+    if( pCsr->iCol==nCol ){
+      rc = FTS5_CORRUPT;
+    }
   }
   return rc;
 }
@@ -635,6 +651,9 @@ static int fts5VocabFilterMethod(
   if( rc==SQLITE_OK ){
     Fts5Index *pIndex = pCsr->pFts5->pIndex;
     rc = sqlite3Fts5IndexQuery(pIndex, zTerm, nTerm, f, 0, &pCsr->pIter);
+    if( rc==SQLITE_OK ){
+      pCsr->pStruct = sqlite3Fts5StructureRef(pIndex);
+    }
   }
   if( rc==SQLITE_OK && eType==FTS5_VOCAB_INSTANCE ){
     rc = fts5VocabInstanceNewTerm(pCsr);

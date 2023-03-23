@@ -39,25 +39,9 @@ struct SHA1Context {
   unsigned char buffer[64];
 };
 
-
-#if __GNUC__ && (defined(__i386__) || defined(__x86_64__))
-/*
- * GCC by itself only generates left rotates.  Use right rotates if
- * possible to be kinder to dinky implementations with iterative rotate
- * instructions.
- */
-#define SHA_ROT(op, x, k) \
-        ({ unsigned int y; asm(op " %1,%0" : "=r" (y) : "I" (k), "0" (x)); y; })
-#define rol(x,k) SHA_ROT("roll", x, k)
-#define ror(x,k) SHA_ROT("rorl", x, k)
-
-#else
-/* Generic C equivalent */
 #define SHA_ROT(x,l,r) ((x) << (l) | (x) >> (r))
 #define rol(x,k) SHA_ROT(x,k,32-(k))
 #define ror(x,k) SHA_ROT(x,32-(k),k)
-#endif
-
 
 #define blk0le(i) (block[i] = (ror(block[i],8)&0xFF00FF00) \
     |(rol(block[i],8)&0x00FF00FF))
@@ -87,7 +71,7 @@ struct SHA1Context {
 /*
  * Hash a single 512-bit block. This is the core of the algorithm.
  */
-void SHA1Transform(unsigned int state[5], const unsigned char buffer[64]){
+static void SHA1Transform(unsigned int state[5], const unsigned char buffer[64]){
   unsigned int qq[5]; /* a, b, c, d, e; */
   static int one = 1;
   unsigned int block[16];
@@ -397,10 +381,12 @@ int sqlite3_sha_init(
   int rc = SQLITE_OK;
   SQLITE_EXTENSION_INIT2(pApi);
   (void)pzErrMsg;  /* Unused parameter */
-  rc = sqlite3_create_function(db, "sha1", 1, SQLITE_UTF8, 0,
-                               sha1Func, 0, 0);
+  rc = sqlite3_create_function(db, "sha1", 1, 
+                       SQLITE_UTF8 | SQLITE_INNOCUOUS | SQLITE_DETERMINISTIC,
+                               0, sha1Func, 0, 0);
   if( rc==SQLITE_OK ){
-    rc = sqlite3_create_function(db, "sha1_query", 1, SQLITE_UTF8, 0,
+    rc = sqlite3_create_function(db, "sha1_query", 1, 
+                                 SQLITE_UTF8|SQLITE_DIRECTONLY, 0,
                                  sha1QueryFunc, 0, 0);
   }
   return rc;

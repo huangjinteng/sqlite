@@ -89,6 +89,9 @@
 #      verbose
 #
 
+# Only run this script once.  If sourced a second time, make it a no-op
+if {[info exists ::tester_tcl_has_run]} return
+
 # Set the precision of FP arithmatic used by the interpreter. And
 # configure SQLite to take database file locks on the page that begins
 # 64KB into the database file instead of the one 1GB in. This means
@@ -129,6 +132,7 @@ if {[info command sqlite_orig]==""} {
         set ::dbhandle [lindex $args 0]
         uplevel #0 $::G(perm:dbconfig)
       }
+      [lindex $args 0] cache size 3
       set res
     } else {
       # This command is not opening a new database connection. Pass the
@@ -173,8 +177,14 @@ proc get_pwd {} {
     #       case of the result to what Tcl considers canonical, which would
     #       defeat the purpose of this procedure.
     #
+    if {[info exists ::env(ComSpec)]} {
+      set comSpec $::env(ComSpec)
+    } else {
+      # NOTE: Hard-code the typical default value.
+      set comSpec {C:\Windows\system32\cmd.exe}
+    }
     return [string map [list \\ /] \
-        [string trim [exec -- $::env(ComSpec) /c echo %CD%]]]
+        [string trim [exec -- $comSpec /c CD]]]
   } else {
     return [pwd]
   }
@@ -388,6 +398,7 @@ proc print_help_and_quit {} {
   puts {Options:
   --pause                  Wait for user input before continuing
   --soft-heap-limit=N      Set the soft-heap-limit to N
+  --hard-heap-limit=N      Set the hard-heap-limit to N
   --maxerror=N             Quit after N errors
   --verbose=(0|1)          Control the amount of output.  Default '1'
   --output=FILE            set --verbose=2 and output to FILE.  Implies -q
@@ -408,6 +419,7 @@ if {[info exists cmdlinearg]==0} {
   #
   #   --pause
   #   --soft-heap-limit=NN
+  #   --hard-heap-limit=NN
   #   --maxerror=NN
   #   --malloctrace=N
   #   --backtrace=N
@@ -424,6 +436,7 @@ if {[info exists cmdlinearg]==0} {
   #   --help
   #
   set cmdlinearg(soft-heap-limit)    0
+  set cmdlinearg(hard-heap-limit)    0
   set cmdlinearg(maxerror)        1000
   set cmdlinearg(malloctrace)        0
   set cmdlinearg(backtrace)         10
@@ -449,6 +462,9 @@ if {[info exists cmdlinearg]==0} {
       }
       {^-+soft-heap-limit=.+$} {
         foreach {dummy cmdlinearg(soft-heap-limit)} [split $a =] break
+      }
+      {^-+hard-heap-limit=.+$} {
+        foreach {dummy cmdlinearg(hard-heap-limit)} [split $a =] break
       }
       {^-+maxerror=.+$} {
         foreach {dummy cmdlinearg(maxerror)} [split $a =] break
@@ -536,6 +552,7 @@ if {[info exists cmdlinearg]==0} {
       }
     }
   }
+  unset -nocomplain a
   set testdir [file normalize $testdir]
   set cmdlinearg(TESTFIXTURE_HOME) [pwd]
   set cmdlinearg(INFO_SCRIPT) [file normalize [info script]]
@@ -586,7 +603,8 @@ if {[info exists cmdlinearg]==0} {
 # way if an individual test file changes the soft-heap-limit, it
 # will be reset at the start of the next test file.
 #
-sqlite3_soft_heap_limit $cmdlinearg(soft-heap-limit)
+sqlite3_soft_heap_limit64 $cmdlinearg(soft-heap-limit)
+sqlite3_hard_heap_limit64 $cmdlinearg(hard-heap-limit)
 
 # Create a test database
 #
@@ -775,6 +793,9 @@ proc do_test {name cmd expected} {
       output2 "\nError: $result"
       fail_test $name
     } else {
+      if {[permutation]=="maindbname"} {
+        set result [string map [list [string tolower ICECUBE] main] $result]
+      }
       if {[regexp {^[~#]?/.*/$} $expected]} {
         # "expected" is of the form "/PATTERN/" then the result if correct if
         # regular expression PATTERN matches the result.  "~/PATTERN/" means
@@ -891,8 +912,8 @@ proc catchcmdex {db {cmd ""}} {
 proc filepath_normalize {p} {
   # test cases should be written to assume "unix"-like file paths
   if {$::tcl_platform(platform)!="unix"} {
-    # lreverse*2 as a hack to remove any unneeded {} after the string map
-    lreverse [lreverse [string map {\\ /} [regsub -nocase -all {[a-z]:[/\\]+} $p {/}]]]
+    string map [list \\ / \{/ / .db\} .db] \
+        [regsub -nocase -all {[a-z]:[/\\]+} $p {/}]
   } {
     set p
   }
@@ -927,6 +948,29 @@ proc normalize_list {L} {
   foreach l $L {lappend L2 $l}
   set L2
 }
+
+# Run SQL and verify that the number of "vmsteps" required is greater
+# than or less than some constant.
+#
+proc do_vmstep_test {tn sql nstep {res {}}} {
+  uplevel [list do_execsql_test $tn.0 $sql $res]
+
+  set vmstep [db status vmstep]
+  if {[string range $nstep 0 0]=="+"} {
+    set body "if {$vmstep<$nstep} {
+      error \"got $vmstep, expected more than [string range $nstep 1 end]\"
+    }"
+  } else {
+    set body "if {$vmstep>$nstep} {
+      error \"got $vmstep, expected less than $nstep\"
+    }"
+  }
+
+  # set name "$tn.vmstep=$vmstep,expect=$nstep"
+  set name "$tn.1"
+  uplevel [list do_test $name $body {}]
+}
+
 
 # Either:
 #
@@ -991,6 +1035,7 @@ proc query_plan_graph {sql} {
   append a [append_graph "  " dx cx 0]
   regsub -all { 0x[A-F0-9]+\y} $a { xxxxxx} a
   regsub -all {(MATERIALIZE|CO-ROUTINE|SUBQUERY) \d+\y} $a {\1 xxxxxx} a
+  regsub -all {\((join|subquery)-\d+\)} $a {(\1-xxxxxx)} a
   return $a
 }
 
@@ -1041,7 +1086,16 @@ proc append_graph {prefix dxname cxname level} {
 #
 proc do_eqp_test {name sql res} {
   if {[regexp {^\s+QUERY PLAN\n} $res]} {
-    uplevel do_test $name [list [list query_plan_graph $sql]] [list $res]
+
+    set query_plan [query_plan_graph $sql]
+
+    if {[list {*}$query_plan]==[list {*}$res]} {
+      uplevel [list do_test $name [list set {} ok] ok]
+    } else {
+      uplevel [list \
+        do_test $name [list query_plan_graph $sql] $res
+      ]
+    }
   } else {
     if {[string index $res 0]!="/"} {
       set res "/*$res*/"
@@ -1183,13 +1237,36 @@ proc speed_trial_summary {name} {
   }
 }
 
-# Run this routine last
+# Clear out left-over configuration setup from the end of a test
 #
-proc finish_test {} {
-  catch {db close}
+proc finish_test_precleanup {} {
   catch {db1 close}
   catch {db2 close}
   catch {db3 close}
+  catch {unregister_devsim}
+  catch {unregister_jt_vfs}
+  catch {unregister_demovfs}
+}
+
+# Run this routine last
+#
+proc finish_test {} {
+  global argv
+  finish_test_precleanup
+  if {[llength $argv]>0} {
+    # If additional test scripts are specified on the command-line, 
+    # run them also, before quitting.
+    proc finish_test {} {
+      finish_test_precleanup
+      return
+    }
+    foreach extra $argv {
+      puts "Running \"$extra\""
+      db_delete_and_reopen
+      uplevel #0 source $extra
+    }
+  }
+  catch {db close}
   if {0==[info exists ::SLAVE]} { finalize_testing }
 }
 proc finalize_testing {} {
@@ -1207,7 +1284,8 @@ proc finalize_testing {} {
   db close
   sqlite3_reset_auto_extension
 
-  sqlite3_soft_heap_limit 0
+  sqlite3_soft_heap_limit64 0
+  sqlite3_hard_heap_limit64 0
   set nTest [incr_ntest]
   set nErr [set_test_counter errors]
 
@@ -1264,9 +1342,11 @@ proc finalize_testing {} {
   if {$::cmdlinearg(binarylog)} {
     vfslog finalize binarylog
   }
-  if {$sqlite_open_file_count} {
-    output2 "$sqlite_open_file_count files were left open"
-    incr nErr
+  if {[info exists ::run_thread_tests_called]==0} {
+    if {$sqlite_open_file_count} {
+      output2 "$sqlite_open_file_count files were left open"
+      incr nErr
+    }
   }
   if {[lindex [sqlite3_status SQLITE_STATUS_MALLOC_COUNT 0] 1]>0 ||
               [sqlite3_memory_used]>0} {
@@ -1503,6 +1583,47 @@ proc explain_i {sql {db db}} {
   output2 "----  ------------  ------  ------  ------  ----------------  --  -"
 }
 
+proc execsql_pp {sql {db db}} {
+  set nCol 0
+  $db eval $sql A {
+    if {$nCol==0} {
+      set nCol [llength $A(*)]
+      foreach c $A(*) { 
+        set aWidth($c) [string length $c] 
+        lappend data $c
+      }
+    }
+    foreach c $A(*) { 
+      set n [string length $A($c)]
+      if {$n > $aWidth($c)} {
+        set aWidth($c) $n
+      }
+      lappend data $A($c)
+    }
+  }
+  if {$nCol>0} {
+    set nTotal 0
+    foreach e [array names aWidth] { incr nTotal $aWidth($e) }
+    incr nTotal [expr ($nCol-1) * 3]
+    incr nTotal 4
+
+    set fmt ""
+    foreach c $A(*) { 
+      lappend fmt "% -$aWidth($c)s"
+    }
+    set fmt "| [join $fmt { | }] |"
+    
+    puts [string repeat - $nTotal]
+    for {set i 0} {$i < [llength $data]} {incr i $nCol} {
+      set vals [lrange $data $i [expr $i+$nCol-1]]
+      puts [format $fmt {*}$vals]
+      if {$i==0} { puts [string repeat - $nTotal] }
+    }
+    puts [string repeat - $nTotal]
+  }
+}
+
+
 # Show the VDBE program for an SQL statement but omit the Trace
 # opcode at the beginning.  This procedure can be used to prove
 # that different SQL statements generate exactly the same VDBE code.
@@ -1677,9 +1798,12 @@ proc crashsql {args} {
   set cfile [string map {\\ \\\\} [file nativename [file join [get_pwd] $crashfile]]]
 
   set f [open crash.tcl w]
+  puts $f "sqlite3_initialize ; sqlite3_shutdown"
+  puts $f "catch { install_malloc_faultsim 1 }"
   puts $f "sqlite3_crash_enable 1 $dfltvfs"
   puts $f "sqlite3_crashparams $blocksize $dc $crashdelay $cfile"
   puts $f "sqlite3_test_control_pending_byte $::sqlite_pending_byte"
+  puts $f "autoinstall_test_functions"
 
   # This block sets the cache size of the main database to 10
   # pages. This is done in case the build is configured to omit
@@ -1707,7 +1831,7 @@ proc crashsql {args} {
   }
   close $f
   set r [catch {
-    exec [info nameofexec] crash.tcl >@stdout
+    exec [info nameofexec] crash.tcl >@stdout 2>@stdout
   } msg]
 
   # Windows/ActiveState TCL returns a slightly different
@@ -1718,6 +1842,9 @@ proc crashsql {args} {
     if {$msg=="child killed: unknown signal"} {
       set msg "child process exited abnormally"
     }
+  }
+  if {$r && [string match {*ERROR: LeakSanitizer*} $msg]} {
+    set msg "child process exited abnormally"
   }
 
   lappend r $msg
@@ -1880,21 +2007,23 @@ proc do_ioerr_test {testname args} {
       set ::sqlite_io_error_hardhit 0
       set r [catch $::ioerrorbody msg]
       set ::errseen $r
-      set rc [sqlite3_errcode $::DB]
-      if {$::ioerropts(-erc)} {
-        # If we are in extended result code mode, make sure all of the
-        # IOERRs we get back really do have their extended code values.
-        # If an extended result code is returned, the sqlite3_errcode
-        # TCLcommand will return a string of the form:  SQLITE_IOERR+nnnn
-        # where nnnn is a number
-        if {[regexp {^SQLITE_IOERR} $rc] && ![regexp {IOERR\+\d} $rc]} {
-          return $rc
-        }
-      } else {
-        # If we are not in extended result code mode, make sure no
-        # extended error codes are returned.
-        if {[regexp {\+\d} $rc]} {
-          return $rc
+      if {[info commands db]!=""} {
+        set rc [sqlite3_errcode db]
+        if {$::ioerropts(-erc)} {
+          # If we are in extended result code mode, make sure all of the
+          # IOERRs we get back really do have their extended code values.
+          # If an extended result code is returned, the sqlite3_errcode
+          # TCLcommand will return a string of the form:  SQLITE_IOERR+nnnn
+          # where nnnn is a number
+          if {[regexp {^SQLITE_IOERR} $rc] && ![regexp {IOERR\+\d} $rc]} {
+            return $rc
+          }
+        } else {
+          # If we are not in extended result code mode, make sure no
+          # extended error codes are returned.
+          if {[regexp {\+\d} $rc]} {
+            return $rc
+          }
         }
       }
       # The test repeats as long as $::go is non-zero.  $::go starts out
@@ -2118,13 +2247,13 @@ proc memdebug_log_sql {filename} {
   }
 
   set escaped "BEGIN; ${tbl}${tbl2}${tbl3}${sql} ; COMMIT;"
-  set escaped [string map [list "{" "\\{" "}" "\\}"] $escaped] 
+  set escaped [string map [list "{" "\\{" "}" "\\}" "\\" "\\\\"] $escaped] 
 
   set fd [open $filename w]
   puts $fd "set BUILTIN {"
   puts $fd $escaped
   puts $fd "}"
-  puts $fd {set BUILTIN [string map [list "\\{" "{" "\\}" "}"] $BUILTIN]}
+  puts $fd {set BUILTIN [string map [list "\\{" "{" "\\}" "}" "\\\\" "\\"] $BUILTIN]}
   set mtv [open $::testdir/malloctraceviewer.tcl]
   set txt [read $mtv]
   close $mtv
@@ -2399,8 +2528,10 @@ proc test_restore_config_pagecache {} {
   catch {db3 close}
 
   sqlite3_shutdown
-  eval sqlite3_config_pagecache $::old_pagecache_config
-  unset ::old_pagecache_config 
+  if {[info exists ::old_pagecache_config]} {
+    eval sqlite3_config_pagecache $::old_pagecache_config
+    unset ::old_pagecache_config 
+  }
   sqlite3_initialize
   autoinstall_test_functions
   sqlite3 db test.db
@@ -2425,13 +2556,44 @@ proc test_find_binary {nm} {
 }
 
 # Find the name of the 'shell' executable (e.g. "sqlite3.exe") to use for
-# the tests in shell[1-5].test. If no such executable can be found, invoke
+# the tests in shell*.test. If no such executable can be found, invoke
 # [finish_test ; return] in the callers context.
 #
 proc test_find_cli {} {
   set prog [test_find_binary sqlite3]
   if {$prog==""} { return -code return }
   return $prog
+}
+
+# Find invocation of the 'shell' executable (e.g. "sqlite3.exe") to use
+# for the tests in shell*.test with optional valgrind prefix when the
+# environment variable SQLITE_CLI_VALGRIND_OPT is set. The set value
+# operates as follows:
+#   empty or 0 => no valgrind prefix;
+#   1 => valgrind options for memory leak check;
+#   other => use value as valgrind options.
+# If shell not found, invoke [finish_test ; return] in callers context.
+#
+proc test_cli_invocation {} {
+  set prog [test_find_binary sqlite3]
+  if {$prog==""} { return -code return }
+  set vgrun [expr {[permutation]=="valgrind"}]
+  if {$vgrun || [info exists ::env(SQLITE_CLI_VALGRIND_OPT)]} {
+    if {$vgrun} {
+      set vgo "--quiet"
+    } else {
+      set vgo $::env(SQLITE_CLI_VALGRIND_OPT)
+    }
+    if {$vgo == 0 || $vgo eq ""} {
+      return $prog
+    } elseif {$vgo == 1} {
+      return "valgrind --quiet --leak-check=yes $prog"
+    } else {
+      return "valgrind $vgo $prog"
+    }
+  } else {
+    return $prog
+  }
 }
 
 # Find the name of the 'sqldiff' executable (e.g. "sqlite3.exe") to use for
@@ -2467,6 +2629,9 @@ set sqlite_fts3_enable_parentheses 0
 # this setting by invoking "database_can_be_corrupt"
 #
 database_never_corrupt
+extra_schema_checks 1
 
 source $testdir/thread_common.tcl
 source $testdir/malloc_common.tcl
+
+set tester_tcl_has_run 1

@@ -280,19 +280,19 @@ ifcapable explain {
     SELECT * FROM abc AS t2 WHERE rowid = 1;
   } {
   QUERY PLAN
-  `--SEARCH TABLE abc AS t2 USING INTEGER PRIMARY KEY (rowid=?)
+  `--SEARCH t2 USING INTEGER PRIMARY KEY (rowid=?)
 }
   do_eqp_test misc7-14.2 {
     SELECT * FROM abc AS t2 WHERE a = 1;
 } {
   QUERY PLAN
-  `--SEARCH TABLE abc AS t2 USING INDEX sqlite_autoindex_abc_1 (a=?)
+  `--SEARCH t2 USING INDEX sqlite_autoindex_abc_1 (a=?)
 }
   do_eqp_test misc7-14.3 {
     SELECT * FROM abc AS t2 ORDER BY a;
   } {
   QUERY PLAN
-  `--SCAN TABLE abc AS t2 USING INDEX sqlite_autoindex_abc_1
+  `--SCAN t2 USING INDEX sqlite_autoindex_abc_1
 }
 }
 
@@ -455,12 +455,13 @@ if {$tcl_platform(platform)!="windows"} {
       catchsql {
         SELECT count(*) FROM t3;
       } 
-    } {1 {database disk image is malformed}}
+    } {1 {malformed database schema (t3) - invalid rootpage}}
   }
 }
 
 # Ticket #2470
 #
+reset_db
 do_test misc7-18.1 {
   execsql {
     CREATE TABLE table_1 (col_10);

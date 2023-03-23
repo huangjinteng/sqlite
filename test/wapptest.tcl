@@ -5,13 +5,10 @@ exec wapptclsh "$0" ${1+"$@"}
 # package required wapp
 source [file join [file dirname [info script]] wapp.tcl]
 
-# Read the data from the releasetest_data.tcl script.
-#
-source [file join [file dirname [info script]] releasetest_data.tcl]
-
 # Variables set by the "control" form:
 #
 #   G(platform) - User selected platform.
+#   G(cfgglob)  - Glob pattern that all configurations must match
 #   G(test)     - Set to "Normal", "Veryquick", "Smoketest" or "Build-Only".
 #   G(keep)     - Boolean. True to delete no files after each test.
 #   G(msvc)     - Boolean. True to use MSVC as the compiler.
@@ -19,6 +16,7 @@ source [file join [file dirname [info script]] releasetest_data.tcl]
 #   G(jobs)     - How many sub-processes to run simultaneously.
 #
 set G(platform) $::tcl_platform(os)-$::tcl_platform(machine)
+set G(cfgglob)  *
 set G(test)     Normal
 set G(keep)     1
 set G(msvc)     0
@@ -33,7 +31,7 @@ set G(stdout)   0
 proc wapptest_init {} {
   global G
 
-  set lSave [list platform test keep msvc tcl jobs debug noui stdout] 
+  set lSave [list platform test keep msvc tcl jobs debug noui stdout cfgglob] 
   foreach k $lSave { set A($k) $G($k) }
   array unset G
   foreach k $lSave { set G($k) $A($k) }
@@ -67,6 +65,15 @@ proc wapptest_run {} {
     wapptest_output [format "    %-25s%s" $config $target]
   }
   wapptest_output [string repeat * 70]
+}
+
+proc releasetest_data {args} {
+  global G
+  set rtd [file join $G(srcdir) test releasetest_data.tcl]
+  set fd [open "|[info nameofexecutable] $rtd $args" r+]
+  set ret [read $fd]
+  close $fd
+  return $ret
 }
 
 # Generate the text for the box at the top of the UI. The current SQLite
@@ -108,7 +115,13 @@ proc set_test_array {} {
   global G
   if { $G(state)=="config" } {
     set G(test_array) [list]
-    foreach {config target} $::Platforms($G(platform)) {
+    set debug "-debug"
+    if {$G(debug)==0} { set debug "-nodebug"}
+    foreach {config target} [releasetest_data tests $debug $G(platform)] {
+
+      # All configuration names must match $g(cfgglob), which defaults to *
+      #
+      if {![string match -nocase $G(cfgglob) $config]} continue
 
       # If using MSVC, do not run sanitize or valgrind tests. Or the
       # checksymbols test.
@@ -136,22 +149,6 @@ proc set_test_array {} {
       }
 
       lappend G(test_array) [dict create config $config target $target]
-
-      set exclude [list checksymbols valgrindtest fuzzoomtest]
-      if {$G(debug) && !($target in $exclude)} {
-        set debug_idx [lsearch -glob $::Configs($config) -DSQLITE_DEBUG*]
-        set xtarget $target
-        regsub -all {fulltest[a-z]*} $xtarget test xtarget
-        if {$debug_idx<0} {
-          lappend G(test_array) [
-            dict create config $config-(Debug) target $xtarget
-          ]
-        } else {
-          lappend G(test_array) [
-            dict create config $config-(NDebug) target $xtarget
-          ]
-        }
-      }
     }
   }
 }
@@ -173,7 +170,7 @@ proc count_tests_and_errors {name logfile} {
     }
     if {[regexp {runtime error: +(.*)} $line all msg]} {
       # skip over "value is outside range" errors
-      if {[regexp {value .* is outside the range of representable} $line]} {
+      if {[regexp {.* is outside the range of representable} $line]} {
          # noop
       } else {
         incr G(test.$name.nError)
@@ -288,7 +285,7 @@ proc slave_test_done {name rc} {
 
   wapptest_output $msg
   if {[info exists G(test.$name.errmsg)] && $G(test.$name.errmsg)!=""} {
-    wapptest_output "    $G(test.$config.errmsg)"
+    wapptest_output "    $G(test.$name.errmsg)"
   }
 }
 
@@ -313,41 +310,25 @@ proc slave_fileevent {name} {
 }
 
 # Return the contents of the "slave script" - the script run by slave 
-# processes to actually perform the test. It does two things:
-#
-#   1. Reads and [exec]s the contents of file wapptest_configure.sh.
-#   2. Reads and [exec]s the contents of file wapptest_make.sh.
-#
-# Step 1 is omitted if the test uses MSVC (which does not use configure).
+# processes to actually perform the test. All it does is execute the
+# test script already written to disk (wapptest_cmd.sh or wapptest_cmd.bat).
 #
 proc wapptest_slave_script {} {
   global G
-  set res {
-    proc readfile {filename} {
-      set fd [open $filename]
-      set data [read $fd]
-      close $fd
-      return $data
-    }
+  if {$G(msvc)==0} {
+    set dir [file join .. $G(srcdir)]
+    set res [subst -nocommands {
+      set rc [catch "exec sh wapptest_cmd.sh {$dir} >>& test.log" ]
+      exit [set rc]
+    }]
+  } else {
+    set dir [file nativename [file normalize $G(srcdir)]]
+    set dir [string map [list "\\" "\\\\"] $dir]
+    set res [subst -nocommands {
+      set rc [catch "exec wapptest_cmd.bat {$dir} >>& test.log" ]
+      exit [set rc]
+    }]
   }
-
-  if {$G(msvc)==0} { 
-    append res {
-      set cfg  [readfile wapptest_configure.sh]
-      set rc [catch { exec {*}$cfg >& test.log } msg]
-      if {$rc==0} {
-        set make [readfile wapptest_make.sh]
-        set rc [catch { exec {*}$make >>& test.log }]
-      }
-    } 
-  } else { 
-    append res {
-      set make [readfile wapptest_make.sh]
-      set rc [catch { exec {*}$make >>& test.log }]
-    }
-  }
-
-  append res { exit $rc }
 
   set res
 }
@@ -355,9 +336,7 @@ proc wapptest_slave_script {} {
 
 # Launch a slave process to run a test.
 #
-proc slave_launch {
-  name wtcl title dir configOpts testtarget makeOpts cflags opts
-} {
+proc slave_launch {name target dir} {
   global G
 
   catch { file mkdir $dir } msg
@@ -366,27 +345,17 @@ proc slave_launch {
   }
   set G(test.$name.dir) $dir
 
-  # Write the configure command to wapptest_configure.sh. This file
-  # is empty if using MSVC - MSVC does not use configure.
+  # Write the test command to wapptest_cmd.sh|bat.
   #
-  set fd1 [open [file join $dir wapptest_configure.sh] w]
-  if {$G(msvc)==0} {
-    puts $fd1 "[file join .. $G(srcdir) configure] $wtcl $configOpts"
+  set ext sh
+  if {$G(msvc)} { set ext bat }
+  set fd1 [open [file join $dir wapptest_cmd.$ext] w]
+  if {$G(msvc)} {
+    puts $fd1 [releasetest_data script -msvc $name $target]
+  } else {
+    puts $fd1 [releasetest_data script $name $target]
   }
   close $fd1
-
-  # Write the make command to wapptest_make.sh. Using nmake for MSVC and
-  # make for all other systems.
-  #
-  set makecmd "make"
-  if {$G(msvc)} { 
-    set nativedir [file nativename $G(srcdir)]
-    set nativedir [string map [list "\\" "\\\\"] $nativedir]
-    set makecmd "nmake /f [file join $nativedir Makefile.msc] TOP=$nativedir"
-  }
-  set fd2 [open [file join $dir wapptest_make.sh] w]
-  puts $fd2 "$makecmd $makeOpts $testtarget \"CFLAGS=$cflags\" \"OPTS=$opts\""
-  close $fd2
 
   # Write the wapptest_run.tcl script to the test directory. To run the
   # commands in the other two files.
@@ -448,30 +417,12 @@ proc do_some_stuff {} {
       } {
 
         set target [dict get $j target]
+        set dir [string tolower [string map {" " _ "-" _} $name]]
         set G(test.$name.start) [clock seconds]
-        set wtcl ""
-        if {$G(tcl)!=""} { set wtcl "--with-tcl=$G(tcl)" }
+        set G(test.$name.log) [file join $dir test.log]
 
-        # If this configuration is named <name>-(Debug) or <name>-(NDebug),
-        # then add or remove the SQLITE_DEBUG option from the base
-        # configuration before running the test.
-        if {[regexp -- {(.*)-(\(.*\))} $name -> head tail]} {
-          set opts $::Configs($head)
-          if {$tail=="(Debug)"} {
-            append opts " -DSQLITE_DEBUG=1 -DSQLITE_EXTRA_IFNULLROW=1"
-          } else {
-            regsub { *-DSQLITE_MEMDEBUG[^ ]* *} $opts { } opts
-            regsub { *-DSQLITE_DEBUG[^ ]* *} $opts { } opts
-          }
-        } else {
-          set opts $::Configs($name)
-        }
+        slave_launch $name $target $dir
 
-        set L [make_test_suite $G(msvc) $wtcl $name $target $opts]
-        set G(test.$name.log) [file join [lindex $L 1] test.log]
-        slave_launch $name $wtcl {*}$L
-
-        set G(test.$name.log) [file join [lindex $L 1] test.log]
         incr nLaunch -1
       }
     }
@@ -517,7 +468,7 @@ proc generate_main_page {{extra {}}} {
   }
 
   # Build the "platform" select widget. 
-  set lOpt [array names ::Platforms]
+  set lOpt [releasetest_data platforms]
   generate_select_widget Platform control_platform $lOpt $G(platform)
 
   # Build the "test" select widget. 
@@ -525,7 +476,7 @@ proc generate_main_page {{extra {}}} {
   generate_select_widget Test control_test $lOpt $G(test)
 
   # Build the "jobs" select widget. Options are 1 to 8.
-  generate_select_widget Jobs control_jobs {1 2 3 4 5 6 7 8} $G(jobs)
+  generate_select_widget Jobs control_jobs {1 2 3 4 5 6 7 8 12 16} $G(jobs)
 
   switch $G(state) {
     config {
@@ -840,6 +791,7 @@ default it uses "wapp" to provide an interactive interface. Supported
 command line options (all optional) are:
 
     --platform    PLATFORM         (which tests to run)
+    --config      GLOB             (only run configurations matching GLOB)
     --smoketest                    (run "make smoketest" only)
     --veryquick                    (run veryquick.test only)
     --buildonly                    (build executables, do not run tests)
@@ -880,13 +832,18 @@ for {set i 0} {$i < [llength $argv]} {incr i} {
   }
 }
 
+wapptest_init
 for {set i 0} {$i < [llength $lTestArg]} {incr i} {
-  switch -- [lindex $lTestArg $i] {
+  set opt [lindex $lTestArg $i]
+  if {[string range $opt 0 1]=="--"} {
+    set opt [string range $opt 1 end]
+  }
+  switch -- $opt {
     -platform {
       if {$i==[llength $lTestArg]-1} { wapptest_usage }
       incr i
       set arg [lindex $lTestArg $i]
-      set lPlatform [array names ::Platforms]
+      set lPlatform [releasetest_data platforms]
       if {[lsearch $lPlatform $arg]<0} {
         puts stderr "No such platform: $arg. Platforms are: $lPlatform"
         exit -1
@@ -926,6 +883,12 @@ for {set i 0} {$i < [llength $lTestArg]} {incr i} {
       set G(stdout) 1
     }
 
+    -config {
+      if {$i==[llength $lTestArg]-1} { wapptest_usage }
+      incr i
+      set G(cfgglob) [lindex $lTestArg $i]
+    }
+
     -stdout {
       set G(stdout) 1
     }
@@ -937,7 +900,6 @@ for {set i 0} {$i < [llength $lTestArg]} {incr i} {
   }
 }
 
-wapptest_init
 if {$G(noui)==0} {
   wapp-start $lWappArg
 } else {
@@ -945,4 +907,3 @@ if {$G(noui)==0} {
   do_some_stuff
   vwait forever
 }
-

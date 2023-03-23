@@ -806,12 +806,13 @@ int sqlite3_vfsstat_init(
   int rc = SQLITE_OK;
   SQLITE_EXTENSION_INIT2(pApi);
   vstat_vfs.pVfs = sqlite3_vfs_find(0);
+  if( vstat_vfs.pVfs==0 ) return SQLITE_ERROR;
   vstat_vfs.base.szOsFile = sizeof(VStatFile) + vstat_vfs.pVfs->szOsFile;
   rc = sqlite3_vfs_register(&vstat_vfs.base, 1);
   if( rc==SQLITE_OK ){
     rc = vstatRegister(db, pzErrMsg, pApi);
     if( rc==SQLITE_OK ){
-      rc = sqlite3_auto_extension(vstatRegister);
+      rc = sqlite3_auto_extension((void(*)(void))vstatRegister);
     }
   }
   if( rc==SQLITE_OK ) rc = SQLITE_OK_LOAD_PERMANENTLY;

@@ -31,8 +31,7 @@
 **
 **     mkdir dir
 **     cp dbfuzz2-seed*.db dir
-**     clang-6.0 -I. -g -O1 -fsanitize=fuzzer \
-**       -DTHREADSAFE=0 -DSQLITE_ENABLE_DESERIALIZE \
+**     clang-6.0 -I. -g -O1 -fsanitize=fuzzer -DTHREADSAFE=0 \
 **       -DSQLITE_ENABLE_DBSTAT_VTAB dbfuzz2.c sqlite3.c -ldl
 **     ./a.out dir
 */
@@ -54,7 +53,7 @@
 */
 static const char *azSql[] = {
   "PRAGMA integrity_check;",
-  "SELECT * FROM sqlite_master;",
+  "SELECT * FROM sqlite_schema;",
   "SELECT sum(length(name)) FROM dbstat;",
   "UPDATE t1 SET b=a, a=b WHERE a<b;",
   "ALTER TABLE t1 RENAME TO alkjalkjdfiiiwuer987lkjwer82mx97sf98788s9789s;",
@@ -211,6 +210,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *aData, size_t nByte){
   if( mxCb>0 ){
     sqlite3_progress_handler(db, 10, progress_handler, 0);
   }
+#ifdef SQLITE_TESTCTRL_PRNG_SEED
+  sqlite3_test_control(SQLITE_TESTCTRL_PRNG_SEED, 1, db);
+#endif
   for(i=0; i<sizeof(azSql)/sizeof(azSql[0]); i++){
     if( eVerbosity>=1 ){
       printf("%s\n", azSql[i]);
@@ -284,16 +286,24 @@ int LLVMFuzzerInitialize(int *pArgc, char ***pArgv){
         sqlite3MemTraceActivate(stdout);
         continue;
       }
-      if( strcmp(z,"mem")==0 ){
-        bVdbeDebug = 1;
-        continue;
-      }
       if( strcmp(z,"max-db-size")==0 ){
         if( i+1==argc ){
           fprintf(stderr, "missing argument to %s\n", argv[i]);
           exit(1);
         }
         szMax = strtol(argv[++i], 0, 0);
+        continue;
+      }
+      if( strcmp(z, "lookaside")==0 ){
+        int sz, nSlot;
+        if( i+2>=argc ){
+          fprintf(stderr, 
+             "--lookaside requires two arguments: slot-size num-slots\n");
+          exit(1);
+        }
+        sz = atoi(argv[++i]);
+        nSlot = atoi(argv[++i]);
+        sqlite3_config(SQLITE_CONFIG_LOOKASIDE, sz, nSlot);
         continue;
       }
 #ifndef _WIN32
@@ -377,6 +387,7 @@ int main(int argc, char **argv){
       free(pIn);
     }
   }
+#ifdef RUSAGE_SELF
   if( eVerbosity>0 ){
     struct rusage x;
     printf("SQLite %s\n", sqlite3_sourceid());
@@ -385,6 +396,7 @@ int main(int argc, char **argv){
       printf("Maximum RSS = %ld KB\n", x.ru_maxrss);
     }
   }
+#endif
   return 0;
 }
 #endif /*STANDALONE*/

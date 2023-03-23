@@ -84,12 +84,12 @@ db func regexp -argcount 2 regexfunc
 # in the documentation exist and that the relative precedences of the
 # operators are also as the documentation suggests.
 #
-# EVIDENCE-OF: R-15514-65163 SQLite understands the following binary
+# X-EVIDENCE-OF: R-15514-65163 SQLite understands the following binary
 # operators, in order from highest to lowest precedence: || * / % + -
 # << >> & | < <= > >= = == != <> IS IS
 # NOT IN LIKE GLOB MATCH REGEXP AND OR
 #
-# EVIDENCE-OF: R-38759-38789 Operators IS and IS NOT have the same
+# X-EVIDENCE-OF: R-38759-38789 Operators IS and IS NOT have the same
 # precedence as =.
 #
 
@@ -180,7 +180,7 @@ do_execsql_test e_expr-1.6 {
 # Check that the four unary prefix operators mentioned in the 
 # documentation exist.
 #
-# EVIDENCE-OF: R-13958-53419 Supported unary prefix operators are these:
+# X-EVIDENCE-OF: R-13958-53419 Supported unary prefix operators are these:
 # - + ~ NOT
 #
 do_execsql_test e_expr-2.1 { SELECT -   10   } {-10}
@@ -215,7 +215,7 @@ foreach {tn literal type} {
 #
 # EVIDENCE-OF: R-03679-60639 Equals can be either = or ==.
 #
-# EVIDENCE-OF: R-30082-38996 The non-equals operator can be either != or
+# EVIDENCE-OF: R-49372-18364 The not-equal operator can be either != or
 # <>.
 #
 foreach {tn literal different} {
@@ -254,8 +254,9 @@ foreach {tn a b} {
 #-------------------------------------------------------------------------
 # Test the % operator.
 #
-# EVIDENCE-OF: R-04223-04352 The operator % outputs the integer value of
-# its left operand modulo its right operand.
+# EVIDENCE-OF: R-53431-59159 The % operator casts both of its operands
+# to type INTEGER and then computes the remainder after dividing the
+# left integer by the right integer.
 #
 do_execsql_test e_expr-6.1 {SELECT  72%5}  {2}
 do_execsql_test e_expr-6.2 {SELECT  72%-5} {2}
@@ -264,13 +265,10 @@ do_execsql_test e_expr-6.4 {SELECT -72%5}  {-2}
 do_execsql_test e_expr-6.5 {SELECT 72.35%5} {2.0}
 
 #-------------------------------------------------------------------------
-# Test that the results of all binary operators are either numeric or 
-# NULL, except for the || operator, which may evaluate to either a text
-# value or NULL.
-#
-# EVIDENCE-OF: R-20665-17792 The result of any binary operator is either
-# a numeric value or NULL, except for the || concatenation operator
-# which always evaluates to either NULL or a text value.
+# EVIDENCE-OF: R-15904-00746 The result of any binary operator is either
+# a numeric value or NULL, except for the || concatenation operator, and
+# the -> and ->> extract operators which evaluate to either
+# NULL or a text value.
 #
 set literals {
   1 'abc'        2 'hexadecimal'       3 ''
@@ -367,7 +365,7 @@ db collate reverse reverse_collate
 # EVIDENCE-OF: R-59577-33471 The COLLATE operator is a unary postfix
 # operator that assigns a collating sequence to an expression.
 #
-# EVIDENCE-OF: R-36231-30731 The COLLATE operator has a higher
+# X-EVIDENCE-OF: R-36231-30731 The COLLATE operator has a higher
 # precedence (binds more tightly) than any binary operator and any unary
 # prefix operator except "~".
 #
@@ -859,7 +857,7 @@ foreach {tn x expr res nEval} {
   } [list $nEval $res]
 }
 
-# EVIDENCE-OF: R-05155-34454 The precedence of the BETWEEN operator is
+# X-EVIDENCE-OF: R-05155-34454 The precedence of the BETWEEN operator is
 # the same as the precedence as operators == and != and LIKE and groups
 # left to right.
 # 
@@ -1139,7 +1137,7 @@ sqlite3 db test.db
 #-------------------------------------------------------------------------
 # Test cases for the testable statements related to the CASE expression.
 #
-# EVIDENCE-OF: R-15199-61389 There are two basic forms of the CASE
+# EVIDENCE-OF: R-57495-24088 There are two fundamental forms of the CASE
 # expression: those with a base expression and those without.
 #
 do_execsql_test e_expr-20.1 {
@@ -1235,11 +1233,11 @@ db nullvalue {}
 # evaluating WHEN terms.
 #
 do_execsql_test e_expr-21.4.1 {
-  SELECT CASE WHEN NULL THEN 'A' WHEN 1 THEN 'B' END
-} {B}
+  SELECT CASE WHEN NULL THEN 'A' WHEN 1 THEN 'B' END, iif(NULL,8,99);
+} {B 99}
 do_execsql_test e_expr-21.4.2 {
-  SELECT CASE WHEN 0 THEN 'A' WHEN NULL THEN 'B' ELSE 'C' END
-} {C}
+  SELECT CASE WHEN 0 THEN 'A' WHEN NULL THEN 'B' ELSE 'C' END, iif(0,8,99);
+} {C 99}
 
 # EVIDENCE-OF: R-38620-19499 In a CASE with a base expression, the base
 # expression is evaluated just once and the result is compared against
@@ -1644,16 +1642,47 @@ do_expr_test e_expr-31.2.4 {
 } integer 9223372036854775807
 
 
-# EVIDENCE-OF: R-09295-61337 Casting a TEXT or BLOB value into NUMERIC
-# first does a forced conversion into REAL but then further converts the
-# result into INTEGER if and only if the conversion from REAL to INTEGER
-# is lossless and reversible.
+# EVIDENCE-OF: R-55084-10555 Casting a TEXT or BLOB value into NUMERIC
+# yields either an INTEGER or a REAL result.
+#
+# EVIDENCE-OF: R-48945-04866 If the input text looks like an integer
+# (there is no decimal point nor exponent) and the value is small enough
+# to fit in a 64-bit signed integer, then the result will be INTEGER.
+#
+# EVIDENCE-OF: R-47045-23194 Input text that looks like floating point
+# (there is a decimal point and/or an exponent) and the text describes a
+# value that can be losslessly converted back and forth between IEEE 754
+# 64-bit float and a 51-bit signed integer, then the result is INTEGER.
 #
 do_expr_test e_expr-32.1.1 { CAST('45'   AS NUMERIC)  } integer 45
 do_expr_test e_expr-32.1.2 { CAST('45.0' AS NUMERIC)  } integer 45
 do_expr_test e_expr-32.1.3 { CAST('45.2' AS NUMERIC)  } real 45.2
 do_expr_test e_expr-32.1.4 { CAST('11abc' AS NUMERIC) } integer 11
 do_expr_test e_expr-32.1.5 { CAST('11.1abc' AS NUMERIC) } real 11.1
+do_expr_test e_expr-32.1.6 {CAST( '9.223372036e14' AS NUMERIC)} integer  922337203600000
+do_expr_test e_expr-32.1.7 {CAST('-9.223372036e14' AS NUMERIC)} integer -922337203600000
+do_test e_expr-32.1.8 {
+  set expr {CAST( '9.223372036e15' AS NUMERIC)}
+  db eval "SELECT typeof($expr) AS type, printf('%.5e',$expr) AS value"  break;
+  list $type $value
+} {real 9.22337e+15}
+do_test e_expr-32.1.9 {
+  set expr {CAST('-9.223372036e15' AS NUMERIC)}
+  db eval "SELECT typeof($expr) AS type, printf('%.5e',$expr) AS value"  break;
+  list $type $value
+} {real -9.22337e+15}
+
+# EVIDENCE-OF: R-50300-26941 Any text input that describes a value
+# outside the range of a 64-bit signed integer yields a REAL result.
+#
+do_expr_test e_expr-32.1.20 { CAST('9223372036854775807' AS numeric) } \
+   integer 9223372036854775807
+do_expr_test e_expr-32.1.21 { CAST('9223372036854775808' AS numeric) } \
+   real 9.22337203685478e+18
+do_expr_test e_expr-32.1.22 { CAST('-9223372036854775808' AS numeric) } \
+   integer -9223372036854775808
+do_expr_test e_expr-32.1.23 { CAST('-9223372036854775809' AS numeric) } \
+   real -9.22337203685478e+18
 
 # EVIDENCE-OF: R-30347-18702 Casting a REAL or INTEGER value to NUMERIC
 # is a no-op, even if a real value could be losslessly converted to an
@@ -1701,14 +1730,14 @@ do_execsql_test e_expr-32.2.8 {
  integer 9000000000000000001 \
  integer 9000000000000000001 \
  integer 9000000000000000001 \
- integer 9000000000000000001 \
+ real 9.0e+18 \
  integer 9223372036854775807 \
  integer 9223372036854775807 \
  integer 9223372036854775807 \
  real 9.22337203685478e+18 \
  real 9.22337203685478e+18 \
- integer 9223372036854775807 \
- integer 9223372036854775807 \
+ real 9.22337203685478e+18 \
+ real 9.22337203685478e+18 \
  integer -5 \
  integer -5 \
 ]
@@ -1863,9 +1892,10 @@ do_expr_test e_expr-35.1.6 {
   (SELECT a FROM t2 UNION SELECT COALESCE(b, 55) FROM t2 ORDER BY 1)
 } integer 4
 
-# EVIDENCE-OF: R-22239-33740 A subquery that returns two or more columns
-# is a row value subquery and can only be used as the operand of a
-# comparison operator.
+# EVIDENCE-OF: R-43101-20178 A subquery that returns two or more columns
+# is a row value subquery and can only be used as an operand of a
+# comparison operator or as the value in an UPDATE SET clause whose
+# column name list has the same size.
 #
 # The following block tests that errors are returned in a bunch of cases
 # where a subquery returns more than one column.
@@ -1884,9 +1914,6 @@ foreach {tn sql} {
 
 # EVIDENCE-OF: R-18318-14995 The value of a subquery expression is the
 # first row of the result from the enclosed SELECT statement.
-#
-# EVIDENCE-OF: R-15900-52156 In other words, an implied "LIMIT 1" is
-# added to the subquery, overriding an explicitly coded LIMIT.
 #
 do_execsql_test e_expr-36.3.1 {
   CREATE TABLE t4(x, y);
@@ -1924,39 +1951,39 @@ foreach {tn expr} {
 # 'english' and '0' are all considered to be false.
 #
 do_execsql_test e_expr-37.1 {
-   SELECT CASE WHEN NULL THEN 'true' ELSE 'false' END;
-} {false}
+   SELECT CASE WHEN NULL THEN 'true' ELSE 'false' END, iif(NULL,'true','false');
+} {false false}
 do_execsql_test e_expr-37.2 {
-   SELECT CASE WHEN 0.0 THEN 'true' ELSE 'false' END;
-} {false}
+   SELECT CASE WHEN 0.0 THEN 'true' ELSE 'false' END, iif(0.0,'true','false');
+} {false false}
 do_execsql_test e_expr-37.3 {
-   SELECT CASE WHEN 0 THEN 'true' ELSE 'false' END;
-} {false}
+   SELECT CASE WHEN 0 THEN 'true' ELSE 'false' END, iif(0,'true','false');
+} {false false}
 do_execsql_test e_expr-37.4 {
-   SELECT CASE WHEN 'engligh' THEN 'true' ELSE 'false' END;
-} {false}
+   SELECT CASE WHEN 'engligh' THEN 'true' ELSE 'false' END, iif('engligh','true','false');
+} {false false}
 do_execsql_test e_expr-37.5 {
-   SELECT CASE WHEN '0' THEN 'true' ELSE 'false' END;
-} {false}
+   SELECT CASE WHEN '0' THEN 'true' ELSE 'false' END, iif('0','true','false');
+} {false false}
 
 # EVIDENCE-OF: R-55532-10108 Values 1, 1.0, 0.1, -0.1 and '1english' are
 # considered to be true.
 #
 do_execsql_test e_expr-37.6 {
-   SELECT CASE WHEN 1 THEN 'true' ELSE 'false' END;
-} {true}
+   SELECT CASE WHEN 1 THEN 'true' ELSE 'false' END, iif(1,'true','false');
+} {true true}
 do_execsql_test e_expr-37.7 {
-   SELECT CASE WHEN 1.0 THEN 'true' ELSE 'false' END;
-} {true}
+   SELECT CASE WHEN 1.0 THEN 'true' ELSE 'false' END, iif(1.0,'true','false');
+} {true true}
 do_execsql_test e_expr-37.8 {
-   SELECT CASE WHEN 0.1 THEN 'true' ELSE 'false' END;
-} {true}
+   SELECT CASE WHEN 0.1 THEN 'true' ELSE 'false' END, iif(0.1,'true','false');
+} {true true}
 do_execsql_test e_expr-37.9 {
-   SELECT CASE WHEN -0.1 THEN 'true' ELSE 'false' END;
-} {true}
+   SELECT CASE WHEN -0.1 THEN 'true' ELSE 'false' END, iif(-0.1,'true','false');
+} {true true}
 do_execsql_test e_expr-37.10 {
-   SELECT CASE WHEN '1english' THEN 'true' ELSE 'false' END;
-} {true}
+   SELECT CASE WHEN '1english' THEN 'true' ELSE 'false' END, iif('1engl','true','false');
+} {true true}
 
 
 finish_test

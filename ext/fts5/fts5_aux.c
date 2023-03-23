@@ -163,7 +163,7 @@ static int fts5HighlightCb(
   if( tflags & FTS5_TOKEN_COLOCATED ) return SQLITE_OK;
   iPos = p->iPos++;
 
-  if( p->iRangeEnd>0 ){
+  if( p->iRangeEnd>=0 ){
     if( iPos<p->iRangeStart || iPos>p->iRangeEnd ) return SQLITE_OK;
     if( p->iRangeStart && iPos==p->iRangeStart ) p->iOff = iStartOff;
   }
@@ -175,7 +175,7 @@ static int fts5HighlightCb(
   }
 
   if( iPos==p->iter.iEnd ){
-    if( p->iRangeEnd && p->iter.iStart<p->iRangeStart ){
+    if( p->iRangeEnd>=0 && p->iter.iStart<p->iRangeStart ){
       fts5HighlightAppend(&rc, p, p->zOpen, -1);
     }
     fts5HighlightAppend(&rc, p, &p->zIn[p->iOff], iEndOff - p->iOff);
@@ -186,7 +186,7 @@ static int fts5HighlightCb(
     }
   }
 
-  if( p->iRangeEnd>0 && iPos==p->iRangeEnd ){
+  if( p->iRangeEnd>=0 && iPos==p->iRangeEnd ){
     fts5HighlightAppend(&rc, p, &p->zIn[p->iOff], iEndOff - p->iOff);
     p->iOff = iEndOff;
     if( iPos>=p->iter.iStart && iPos<p->iter.iEnd ){
@@ -221,6 +221,7 @@ static void fts5HighlightFunction(
   memset(&ctx, 0, sizeof(HighlightContext));
   ctx.zOpen = (const char*)sqlite3_value_text(apVal[1]);
   ctx.zClose = (const char*)sqlite3_value_text(apVal[2]);
+  ctx.iRangeEnd = -1;
   rc = pApi->xColumnText(pFts, iCol, &ctx.zIn, &ctx.nIn);
 
   if( ctx.zIn ){
@@ -406,6 +407,7 @@ static void fts5SnippetFunction(
   iCol = sqlite3_value_int(apVal[0]);
   ctx.zOpen = fts5ValueToText(apVal[1]);
   ctx.zClose = fts5ValueToText(apVal[2]);
+  ctx.iRangeEnd = -1;
   zEllips = fts5ValueToText(apVal[3]);
   nToken = sqlite3_value_int(apVal[4]);
 
@@ -566,7 +568,7 @@ static int fts5Bm25GetData(
   int rc = SQLITE_OK;             /* Return code */
   Fts5Bm25Data *p;                /* Object to return */
 
-  p = pApi->xGetAuxdata(pFts, 0);
+  p = (Fts5Bm25Data*)pApi->xGetAuxdata(pFts, 0);
   if( p==0 ){
     int nPhrase;                  /* Number of phrases in query */
     sqlite3_int64 nRow = 0;       /* Number of rows in table */
@@ -640,7 +642,7 @@ static void fts5Bm25Function(
 ){
   const double k1 = 1.2;          /* Constant "k1" from BM25 formula */
   const double b = 0.75;          /* Constant "b" from BM25 formula */
-  int rc = SQLITE_OK;             /* Error code */
+  int rc;                         /* Error code */
   double score = 0.0;             /* SQL function return value */
   Fts5Bm25Data *pData;            /* Values allocated/calculated once only */
   int i;                          /* Iterator variable */
@@ -672,17 +674,15 @@ static void fts5Bm25Function(
     D = (double)nTok;
   }
 
-  /* Determine the BM25 score for the current row. */
-  for(i=0; rc==SQLITE_OK && i<pData->nPhrase; i++){
-    score += pData->aIDF[i] * (
-      ( aFreq[i] * (k1 + 1.0) ) / 
-      ( aFreq[i] + k1 * (1 - b + b * D / pData->avgdl) )
-    );
-  }
-  
-  /* If no error has occurred, return the calculated score. Otherwise,
-  ** throw an SQL exception.  */
+  /* Determine and return the BM25 score for the current row. Or, if an
+  ** error has occurred, throw an exception. */
   if( rc==SQLITE_OK ){
+    for(i=0; i<pData->nPhrase; i++){
+      score += pData->aIDF[i] * (
+          ( aFreq[i] * (k1 + 1.0) ) / 
+          ( aFreq[i] + k1 * (1 - b + b * D / pData->avgdl) )
+      );
+    }
     sqlite3_result_double(pCtx, -1.0 * score);
   }else{
     sqlite3_result_error_code(pCtx, rc);

@@ -684,7 +684,7 @@ do_test alter-8.2 {
 # alter-9.X - Special test: Make sure the sqlite_rename_column() and
 # rename_table() functions do not crash when handed bad input.
 #
-sqlite3_test_control SQLITE_TESTCTRL_INTERNAL_FUNCTIONS 1
+sqlite3_test_control SQLITE_TESTCTRL_INTERNAL_FUNCTIONS db
 do_test alter-9.1 {
   execsql {SELECT SQLITE_RENAME_COLUMN(0,0,0,0,0,0,0,0,0)}
 } {{}}
@@ -697,7 +697,7 @@ foreach {tn sql} {
     catch { execsql $sql }
   } 1
 }
-sqlite3_test_control SQLITE_TESTCTRL_INTERNAL_FUNCTIONS 0
+sqlite3_test_control SQLITE_TESTCTRL_INTERNAL_FUNCTIONS db
 
 # If the INTERNAL_FUNCTIONS test-control is disabled (which is the default),
 # then the sqlite_rename_table() SQL function is not accessible to ordinary SQL.
@@ -840,6 +840,7 @@ do_test alter-13.3 {
 do_test alter-14.1 {
   catchsql {
     CREATE TABLE t3651(a UNIQUE);
+    INSERT INTO t3651 VALUES(5);
     ALTER TABLE t3651 ADD COLUMN b UNIQUE;
   }
 } {1 {Cannot add a UNIQUE column}}
@@ -856,7 +857,6 @@ do_test alter-14.2 {
 set system_table_list {1 sqlite_master}
 catchsql ANALYZE
 ifcapable analyze { lappend system_table_list 2 sqlite_stat1 }
-ifcapable stat3   { lappend system_table_list 3 sqlite_stat3 }
 ifcapable stat4   { lappend system_table_list 4 sqlite_stat4 }
 
 foreach {tn tbl} $system_table_list {
@@ -902,5 +902,37 @@ ifcapable rtree {
     SELECT * FROM t2 ORDER BY 1;
   } {1 1.0 2.0 3 1.5 3.5}
 }
+
+# 2021-03-08 dbsqlfuzz 3f0a7245b69cd08617d7d7781ebaedb0fe765a93
+reset_db
+do_catchsql_test alter-18.1 {
+  CREATE TABLE t1(a,b,c);
+  CREATE TABLE log(a INTEGER PRIMARY KEY,b,c);
+  CREATE TRIGGER tr1 AFTER INSERT ON t1 BEGIN
+    INSERT INTO logx(a,b,c) VALUES(new.a,new.b,new.c)
+    ON CONFLICT(a) DO UPDATE SET c=excluded.c, b=new.b;
+  END;
+  ALTER TABLE log RENAME COLUMN a TO x;
+} {1 {error in trigger tr1: no such table: main.logx}}
+
+# 2021-10-13 dbsqlfuzz e89174cbfad2d904f06b5e24df0a22510b6a1c1e
+reset_db
+do_execsql_test alter-19.1 {
+  CREATE TABLE t1(x);
+  CREATE TABLE t2(c);
+  CREATE TRIGGER r1 AFTER INSERT ON t2 BEGIN
+    UPDATE t2 SET (c)=(
+       EXISTS(SELECT 1 WHERE (WITH cte1(a) AS (SELECT 1 FROM t1 WHERE (SELECT 1 WHERE (WITH cte2(b) AS (VALUES(1))SELECT b FROM cte2)))SELECT a FROM cte1))
+    );
+  END;
+  ALTER TABLE t2 RENAME TO t3;
+} {}
+do_execsql_test alter-19.2 {
+  SELECT name FROM sqlite_schema WHERE sql LIKE '%t2%';
+} {}
+do_execsql_test alter-19.3 {
+  SELECT name FROM sqlite_schema WHERE sql LIKE '%t3%' ORDER BY name;
+} {r1 t3}
+
 
 finish_test

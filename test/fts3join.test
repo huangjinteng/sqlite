@@ -97,10 +97,11 @@ do_eqp_test 4.2 {
   WHERE t4.y = ?;
 } {
   QUERY PLAN
-  |--MATERIALIZE xxxxxx
-  |  `--SCAN TABLE ft4 VIRTUAL TABLE INDEX 3:
-  |--SCAN TABLE t4
-  `--SEARCH SUBQUERY xxxxxx AS rr USING AUTOMATIC COVERING INDEX (docid=?)
+  |--MATERIALIZE rr
+  |  `--SCAN ft4 VIRTUAL TABLE INDEX 3:
+  |--SCAN t4
+  |--BLOOM FILTER ON rr (docid=?)
+  `--SEARCH rr USING AUTOMATIC COVERING INDEX (docid=?) LEFT-JOIN
 }
 
 finish_test

@@ -188,11 +188,11 @@ foreach {tn pgsz} {
     INSERT INTO hh(hh, rank) VALUES('pgsz', $pgsz);
 
     WITH s(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM s WHERE i<999)
-     INSERT INTO hh SELECT printf("%.3d%.3d%.3d %.3d%.3d%.3d",i,i,i,i+1,i+1,i+1)
+     INSERT INTO hh SELECT printf('%.3d%.3d%.3d %.3d%.3d%.3d',i,i,i,i+1,i+1,i+1)
      FROM s;
 
     WITH s(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM s WHERE i<999)
-     INSERT INTO hh SELECT printf("%.3d%.3d%.3d %.3d%.3d%.3d",i,i,i,i+1,i+1,i+1)
+     INSERT INTO hh SELECT printf('%.3d%.3d%.3d %.3d%.3d%.3d',i,i,i,i+1,i+1,i+1)
      FROM s;
 
     INSERT INTO hh(hh) VALUES('optimize');
@@ -209,5 +209,112 @@ foreach {tn pgsz} {
     set ok
   } {1000}
 }
+
+#-------------------------------------------------------------------------
+#
+reset_db
+do_execsql_test 7.0 {
+  PRAGMA encoding = 'UTF-16';
+  CREATE VIRTUAL TABLE vt0 USING fts5(c0);
+  INSERT INTO vt0 VALUES (x'46f0');
+  SELECT quote(c0) FROM vt0;
+} {X'46F0'}
+do_execsql_test 7.1 {
+  INSERT INTO vt0(vt0) VALUES('integrity-check');
+}
+do_execsql_test 7.2 {
+  INSERT INTO vt0(vt0) VALUES('rebuild');
+}
+do_execsql_test 7.3 {
+  INSERT INTO vt0(vt0) VALUES('integrity-check');
+}
+do_execsql_test 7.4 {
+  UPDATE vt0 SET c0='';
+}
+do_execsql_test 7.5 {
+  INSERT INTO vt0(vt0) VALUES('integrity-check');
+}
+
+#-------------------------------------------------------------------------
+# Ticket 7a458c2a5f4
+#
+reset_db
+do_execsql_test 8.0 {
+  PRAGMA locking_mode = EXCLUSIVE;
+  PRAGMA journal_mode = PERSIST;
+  CREATE VIRTUAL TABLE vt0 USING fts5(c0);
+} {exclusive persist}
+do_execsql_test 8.1 {
+  PRAGMA data_version
+} {1}
+do_execsql_test 8.2 {
+  INSERT INTO vt0(vt0) VALUES('integrity-check');
+  PRAGMA data_version;
+} {1}
+do_execsql_test 8.1 {
+  INSERT INTO vt0(vt0, rank) VALUES('usermerge', 2);
+}
+
+#-------------------------------------------------------------------------
+# Ticket [771fe617]
+#
+reset_db
+do_execsql_test 9.0 {
+  PRAGMA encoding = 'UTF16';
+  CREATE VIRTUAL TABLE vt0 USING fts5(c0);
+}
+
+#explain_i { SELECT quote(SUBSTR(x'37', 0)); }
+#execsql { PRAGMA vdbe_trace = 1 }
+do_execsql_test 9.1.1 {
+  SELECT quote(SUBSTR(x'37', 0));
+} {X'37'}
+do_execsql_test 9.1.2 {
+  SELECT quote(x'37');
+} {X'37'}
+
+do_execsql_test 9.2 {
+  INSERT INTO vt0 VALUES (SUBSTR(x'37', 0));
+--  INSERT INTO vt0 VALUES (x'37');
+}
+do_execsql_test 9.3 {
+  INSERT INTO vt0(vt0) VALUES('integrity-check');
+}
+
+#-------------------------------------------------------------------------
+reset_db
+do_execsql_test 10.0 {
+  CREATE TABLE t1(i INTEGER PRIMARY KEY, a, b);
+  CREATE VIRTUAL TABLE vt0 USING fts5(a, b, content=t1);
+  INSERT INTO vt0(rowid, a, b) VALUES(1, 'abc', 'def');
+}
+do_catchsql_test 10.1 {
+  INSERT INTO vt0(vt0) VALUES('integrity-check');
+} {0 {}}
+do_catchsql_test 10.2 {
+  INSERT INTO vt0(vt0, rank) VALUES('integrity-check', 0);
+} {0 {}}
+do_catchsql_test 10.3 {
+  INSERT INTO vt0(vt0, rank) VALUES('integrity-check', 1);
+} {1 {database disk image is malformed}}
+do_catchsql_test 10.3 {
+  INSERT INTO t1 VALUES(1, 'abc', 'def');
+  INSERT INTO vt0(vt0, rank) VALUES('integrity-check', 1);
+} {0 {}}
+
+do_execsql_test 10.4 {
+  CREATE VIRTUAL TABLE vt1 USING fts5(a, b, content=);
+  INSERT INTO vt1(rowid, a, b) VALUES(1, 'abc', 'def');
+}
+
+do_catchsql_test 10.5.1 {
+  INSERT INTO vt0(vt0, rank) VALUES('integrity-check', 0);
+} {0 {}}
+do_catchsql_test 10.5.2 {
+  INSERT INTO vt0(vt0, rank) VALUES('integrity-check', 1);
+} {0 {}}
+do_catchsql_test 10.5.3 {
+  INSERT INTO vt0(vt0) VALUES('integrity-check');
+} {0 {}}
 
 finish_test

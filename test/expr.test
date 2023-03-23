@@ -181,29 +181,53 @@ if {[working_64bit_int]} {
 }
 
 test_expr expr-1.111 {i1=NULL, i2=8} {i1 IS i2} 0
+test_expr expr-1.111b {i1=NULL, i2=8} {i1 IS NOT DISTINCT FROM i2} 0
 test_expr expr-1.112 {i1=NULL, i2=NULL} {i1 IS i2} 1
+test_expr expr-1.112b {i1=NULL, i2=NULL} {i1 IS NOT DISTINCT FROM i2} 1
 test_expr expr-1.113 {i1=6, i2=NULL} {i1 IS i2} 0
+test_expr expr-1.113b {i1=6, i2=NULL} {i1 IS NOT DISTINCT FROM i2} 0
 test_expr expr-1.114 {i1=6, i2=6} {i1 IS i2} 1
+test_expr expr-1.114b {i1=6, i2=6} {i1 IS NOT DISTINCT FROM i2} 1
 test_expr expr-1.115 {i1=NULL, i2=8} \
   {CASE WHEN i1 IS i2 THEN 'yes' ELSE 'no' END} no
+test_expr expr-1.115b {i1=NULL, i2=8} \
+  {CASE WHEN i1 IS NOT DISTINCT FROM i2 THEN 'yes' ELSE 'no' END} no
 test_expr expr-1.116 {i1=NULL, i2=NULL} \
   {CASE WHEN i1 IS i2 THEN 'yes' ELSE 'no' END} yes
+test_expr expr-1.116b {i1=NULL, i2=NULL} \
+  {CASE WHEN i1 IS NOT DISTINCT FROM i2 THEN 'yes' ELSE 'no' END} yes
 test_expr expr-1.117 {i1=6, i2=NULL} \
   {CASE WHEN i1 IS i2 THEN 'yes' ELSE 'no' END} no
+test_expr expr-1.117b {i1=6, i2=NULL} \
+  {CASE WHEN i1 IS NOT DISTINCT FROM i2 THEN 'yes' ELSE 'no' END} no
 test_expr expr-1.118 {i1=8, i2=8} \
   {CASE WHEN i1 IS i2 THEN 'yes' ELSE 'no' END} yes
+test_expr expr-1.118b {i1=8, i2=8} \
+  {CASE WHEN i1 IS NOT DISTINCT FROM i2 THEN 'yes' ELSE 'no' END} yes
 test_expr expr-1.119 {i1=NULL, i2=8} {i1 IS NOT i2} 1
+test_expr expr-1.119b {i1=NULL, i2=8} {i1 IS DISTINCT FROM i2} 1
 test_expr expr-1.120 {i1=NULL, i2=NULL} {i1 IS NOT i2} 0
+test_expr expr-1.120b {i1=NULL, i2=NULL} {i1 IS DISTINCT FROM i2} 0
 test_expr expr-1.121 {i1=6, i2=NULL} {i1 IS NOT i2} 1
+test_expr expr-1.121b {i1=6, i2=NULL} {i1 IS DISTINCT FROM i2} 1
 test_expr expr-1.122 {i1=6, i2=6} {i1 IS NOT i2} 0
+test_expr expr-1.122b {i1=6, i2=6} {i1 IS DISTINCT FROM i2} 0
 test_expr expr-1.123 {i1=NULL, i2=8} \
   {CASE WHEN i1 IS NOT i2 THEN 'yes' ELSE 'no' END} yes
+test_expr expr-1.123b {i1=NULL, i2=8} \
+  {CASE WHEN i1 IS DISTINCT FROM i2 THEN 'yes' ELSE 'no' END} yes
 test_expr expr-1.124 {i1=NULL, i2=NULL} \
   {CASE WHEN i1 IS NOT i2 THEN 'yes' ELSE 'no' END} no
+test_expr expr-1.124b {i1=NULL, i2=NULL} \
+  {CASE WHEN i1 IS DISTINCT FROM i2 THEN 'yes' ELSE 'no' END} no
 test_expr expr-1.125 {i1=6, i2=NULL} \
   {CASE WHEN i1 IS NOT i2 THEN 'yes' ELSE 'no' END} yes
+test_expr expr-1.125b {i1=6, i2=NULL} \
+  {CASE WHEN i1 IS DISTINCT FROM i2 THEN 'yes' ELSE 'no' END} yes
 test_expr expr-1.126 {i1=8, i2=8} \
   {CASE WHEN i1 IS NOT i2 THEN 'yes' ELSE 'no' END} no
+test_expr expr-1.126b {i1=8, i2=8} \
+  {CASE WHEN i1 IS DISTINCT FROM i2 THEN 'yes' ELSE 'no' END} no
 
 do_catchsql_test expr-1.127 {
   SELECT 1 IS #1;
@@ -970,6 +994,7 @@ do_realnum_test expr-13.7 {
   }
 } {9.22337203685478e+18}
 
+sqlite3_db_config db SQLITE_DBCONFIG_DQS_DML 1
 do_execsql_test expr-13.8 {
   SELECT "" <= '';
 } {1}
@@ -1035,5 +1060,25 @@ foreach {tn val} [list 1 NaN 2 -NaN 3 NaN0 4 -NaN0 5 Inf 6 -Inf] {
      WHERE x
   } {0}
 }
+
+reset_db
+sqlite3_test_control SQLITE_TESTCTRL_INTERNAL_FUNCTIONS db
+do_execsql_test expr-16.1 {
+  CREATE TABLE t1(a,b,c);
+  CREATE TABLE dual(dummy);
+  INSERT INTO dual VALUES('X');
+} {}
+do_execsql_test expr-16.100 {
+  SELECT implies_nonnull_row( (b=1 AND 0)>(b=3 AND 0),a)
+  FROM dual LEFT JOIN t1;
+} {0}
+do_execsql_test expr-16.101 {
+  SELECT implies_nonnull_row( (b=1 AND 0)>(b=3 AND a=4),a)
+  FROM dual LEFT JOIN t1;
+} {1}
+do_execsql_test expr-16.102 {
+  SELECT implies_nonnull_row( (b=1 AND a=2)>(b=3 AND a=4),a)
+  FROM dual LEFT JOIN t1;
+} {1}
 
 finish_test

@@ -26,7 +26,7 @@
 **
 ** The virtual table contains read-only hidden columns:
 **
-**     lsm1_key	      A BLOB which is the raw LSM key.  If the "keytype"
+**     lsm1_key       A BLOB which is the raw LSM key.  If the "keytype"
 **                    is BLOB or TEXT then this column is exactly the
 **                    same as the key.  For the UINT keytype, this column
 **                    will be a variable-length integer encoding of the key.
@@ -842,7 +842,7 @@ static int lsm1BestIndex(
 
   const struct sqlite3_index_constraint *pConstraint;
   pConstraint = pIdxInfo->aConstraint;
-  for(i=0; i<pIdxInfo->nConstraint && idxNum<16; i++, pConstraint++){
+  for(i=0; i<pIdxInfo->nConstraint; i++, pConstraint++){
     if( pConstraint->usable==0 ) continue;
     if( pConstraint->iColumn!=0 ) continue;
     switch( pConstraint->op ){

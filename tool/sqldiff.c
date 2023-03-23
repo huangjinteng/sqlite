@@ -35,6 +35,7 @@ struct GlobalVars {
   int bSchemaPK;            /* Use the schema-defined PK, not the true PK */
   int bHandleVtab;          /* Handle fts3, fts4, fts5 and rtree vtabs */
   unsigned fDebug;          /* Debug flags */
+  int bSchemaCompare;       /* Doing single-table sqlite_schema compare */
   sqlite3 *db;              /* The database connection */
 } g;
 
@@ -192,14 +193,14 @@ static void namelistFree(char **az){
 }
 
 /*
-** Return a list of column names for the table zDb.zTab.  Space to
+** Return a list of column names [a] for the table zDb.zTab.  Space to
 ** hold the list is obtained from sqlite3_malloc() and should released
 ** using namelistFree() when no longer needed.
 **
 ** Primary key columns are listed first, followed by data columns.
 ** The number of columns in the primary key is returned in *pnPkey.
 **
-** Normally, the "primary key" in the previous sentence is the true
+** Normally [a], the "primary key" in the previous sentence is the true
 ** primary key - the rowid or INTEGER PRIMARY KEY for ordinary tables
 ** or the declared PRIMARY KEY for WITHOUT ROWID tables.  However, if
 ** the g.bSchemaPK flag is set, then the schema-defined PRIMARY KEY is
@@ -208,6 +209,9 @@ static void namelistFree(char **az){
 **
 ** If the primary key for a table is the rowid but rowid is inaccessible,
 ** then this routine returns a NULL pointer.
+**
+** [a. If the lone, named table is "sqlite_schema", "rootpage" column is
+**  omitted and the "type" and "name" columns are made to be the PK.]
 **
 ** Examples:
 **    CREATE TABLE t1(a INT UNIQUE, b INTEGER, c TEXT, PRIMARY KEY(c));
@@ -299,19 +303,36 @@ static char **columnNames(
     if( nPK==0 ) nPK = 1;
     truePk = 1;
   }
+  if( g.bSchemaCompare ){
+    assert( sqlite3_stricmp(zTab,"sqlite_schema")==0
+            || sqlite3_stricmp(zTab,"sqlite_master")==0 );
+    /* For sqlite_schema, will use type and name as the PK. */
+    nPK = 2;
+    truePk = 0;
+  }
   *pnPKey = nPK;
   naz = nPK;
   az = sqlite3_malloc( sizeof(char*)*(nPK+1) );
   if( az==0 ) runtimeError("out of memory");
   memset(az, 0, sizeof(char*)*(nPK+1));
+  if( g.bSchemaCompare ){
+    az[0] = sqlite3_mprintf("%s", "type");
+    az[1] = sqlite3_mprintf("%s", "name");
+  }
   while( SQLITE_ROW==sqlite3_step(pStmt) ){
+    char * sid = safeId((char*)sqlite3_column_text(pStmt,1));
     int iPKey;
     if( truePk && (iPKey = sqlite3_column_int(pStmt,5))>0 ){
-      az[iPKey-1] = safeId((char*)sqlite3_column_text(pStmt,1));
+      az[iPKey-1] = sid;
     }else{
-      az = sqlite3_realloc(az, sizeof(char*)*(naz+2) );
-      if( az==0 ) runtimeError("out of memory");
-      az[naz++] = safeId((char*)sqlite3_column_text(pStmt,1));
+      if( !g.bSchemaCompare
+          || !(strcmp(sid,"rootpage")==0
+               ||strcmp(sid,"name")==0
+               ||strcmp(sid,"type")==0)){
+        az = sqlite3_realloc(az, sizeof(char*)*(naz+2) );
+        if( az==0 ) runtimeError("out of memory");
+        az[naz++] = sid;
+      }
     }
   }
   sqlite3_finalize(pStmt);
@@ -322,9 +343,11 @@ static char **columnNames(
   if( pbRowid ) *pbRowid = (az[0]==0);
 
   /* If this table has an implicit rowid for a PK, figure out how to refer
-  ** to it. There are three options - "rowid", "_rowid_" and "oid". Any
-  ** of these will work, unless the table has an explicit column of the
-  ** same name.  */
+  ** to it. There are usually three options - "rowid", "_rowid_" and "oid".
+  ** Any of these will work, unless the table has an explicit column of the
+  ** same name or the sqlite_schema tables are to be compared. In the latter
+  ** case, pretend that the "true" primary key is the name column, which
+  ** avoids extraneous diffs against the schemas due to rowid variance. */
   if( az[0]==0 ){
     const char *azRowid[] = { "rowid", "_rowid_", "oid" };
     for(i=0; i<sizeof(azRowid)/sizeof(azRowid[0]); i++){
@@ -380,16 +403,32 @@ static void printQuoted(FILE *out, sqlite3_value *X){
     }
     case SQLITE_TEXT: {
       const unsigned char *zArg = sqlite3_value_text(X);
-      int i, j;
 
       if( zArg==0 ){
         fprintf(out, "NULL");
       }else{
+        int inctl = 0;
+        int i, j;
         fprintf(out, "'");
         for(i=j=0; zArg[i]; i++){
-          if( zArg[i]=='\'' ){
-            fprintf(out, "%.*s'", i-j+1, &zArg[j]);
+          char c = zArg[i];
+          int ctl = iscntrl(c);
+          if( ctl>inctl ){
+            inctl = ctl;
+            fprintf(out, "%.*s'||X'%02x", i-j, &zArg[j], c);
             j = i+1;
+          }else if( ctl ){
+            fprintf(out, "%02x", c);
+            j = i+1;
+          }else{
+            if( inctl ){
+              inctl = 0;
+              fprintf(out, "'\n||'");
+            }
+            if( c=='\'' ){
+              fprintf(out, "%.*s'", i-j+1, &zArg[j]);
+              j = i+1;
+            }
           }
         }
         fprintf(out, "%s'", &zArg[j]);
@@ -416,7 +455,7 @@ static void dump_table(const char *zTab, FILE *out){
   const char *zSep;         /* Separator string */
   Str ins;                  /* Beginning of the INSERT statement */
 
-  pStmt = db_prepare("SELECT sql FROM aux.sqlite_master WHERE name=%Q", zTab);
+  pStmt = db_prepare("SELECT sql FROM aux.sqlite_schema WHERE name=%Q", zTab);
   if( SQLITE_ROW==sqlite3_step(pStmt) ){
     fprintf(out, "%s;\n", sqlite3_column_text(pStmt,0));
   }
@@ -466,18 +505,20 @@ static void dump_table(const char *zTab, FILE *out){
     sqlite3_finalize(pStmt);
     strFree(&ins);
   } /* endif !g.bSchemaOnly */
-  pStmt = db_prepare("SELECT sql FROM aux.sqlite_master"
+  pStmt = db_prepare("SELECT sql FROM aux.sqlite_schema"
                      " WHERE type='index' AND tbl_name=%Q AND sql IS NOT NULL",
                      zTab);
   while( SQLITE_ROW==sqlite3_step(pStmt) ){
     fprintf(out, "%s;\n", sqlite3_column_text(pStmt,0));
   }
   sqlite3_finalize(pStmt);
+  sqlite3_free(zId);
 }
 
 
 /*
-** Compute all differences for a single table.
+** Compute all differences for a single table, except if the
+** table name is sqlite_schema, ignore the rootpage column.
 */
 static void diff_one_table(const char *zTab, FILE *out){
   char *zId = safeId(zTab); /* Name of table (translated for us in SQL) */
@@ -492,6 +533,8 @@ static void diff_one_table(const char *zTab, FILE *out){
   const char *zSep;         /* Separator string */
   Str sql;                  /* Comparison query */
   sqlite3_stmt *pStmt;      /* Query statement to do the diff */
+  const char *zLead =       /* Becomes line-comment for sqlite_schema */
+    (g.bSchemaCompare)? "-- " : "";
 
   strInit(&sql);
   if( g.fDebug==DEBUG_COLUMN_NAMES ){
@@ -512,19 +555,24 @@ static void diff_one_table(const char *zTab, FILE *out){
     }
     goto end_diff_one_table;
   }
-    
 
   if( sqlite3_table_column_metadata(g.db,"aux",zTab,0,0,0,0,0,0) ){
     if( !sqlite3_table_column_metadata(g.db,"main",zTab,0,0,0,0,0,0) ){
       /* Table missing from second database. */
-      fprintf(out, "DROP TABLE %s;\n", zId);
+      if( g.bSchemaCompare )
+        fprintf(out, "-- 2nd DB has no %s table\n", zTab);
+      else
+        fprintf(out, "DROP TABLE %s;\n", zId);
     }
     goto end_diff_one_table;
   }
 
   if( sqlite3_table_column_metadata(g.db,"main",zTab,0,0,0,0,0,0) ){
     /* Table missing from source */
-    dump_table(zTab, out);
+    if( g.bSchemaCompare )
+      fprintf(out, "-- 1st DB has no %s table\n", zTab);
+    else
+      dump_table(zTab, out);
     goto end_diff_one_table;
   }
 
@@ -541,7 +589,7 @@ static void diff_one_table(const char *zTab, FILE *out){
    || az[n]
   ){
     /* Schema mismatch */
-    fprintf(out, "DROP TABLE %s; -- due to schema mismatch\n", zId);
+    fprintf(out, "%sDROP TABLE %s; -- due to schema mismatch\n", zLead, zId);
     dump_table(zTab, out);
     goto end_diff_one_table;
   }
@@ -639,10 +687,10 @@ static void diff_one_table(const char *zTab, FILE *out){
 
   /* Drop indexes that are missing in the destination */
   pStmt = db_prepare(
-    "SELECT name FROM main.sqlite_master"
+    "SELECT name FROM main.sqlite_schema"
     " WHERE type='index' AND tbl_name=%Q"
     "   AND sql IS NOT NULL"
-    "   AND sql NOT IN (SELECT sql FROM aux.sqlite_master"
+    "   AND sql NOT IN (SELECT sql FROM aux.sqlite_schema"
     "                    WHERE type='index' AND tbl_name=%Q"
     "                      AND sql IS NOT NULL)",
     zTab, zTab);
@@ -660,7 +708,7 @@ static void diff_one_table(const char *zTab, FILE *out){
       int iType = sqlite3_column_int(pStmt, nPk);
       if( iType==1 || iType==2 ){
         if( iType==1 ){       /* Change the content of a row */
-          fprintf(out, "UPDATE %s", zId);
+          fprintf(out, "%sUPDATE %s", zLead, zId);
           zSep = " SET";
           for(i=nPk+1; i<nQ; i+=2){
             if( sqlite3_column_int(pStmt,i)==0 ) continue;
@@ -669,7 +717,7 @@ static void diff_one_table(const char *zTab, FILE *out){
             printQuoted(out, sqlite3_column_value(pStmt,i+1));
           }
         }else{                /* Delete a row */
-          fprintf(out, "DELETE FROM %s", zId);
+          fprintf(out, "%sDELETE FROM %s", zLead, zId);
         }
         zSep = " WHERE";
         for(i=0; i<nPk; i++){
@@ -679,7 +727,7 @@ static void diff_one_table(const char *zTab, FILE *out){
         }
         fprintf(out, ";\n");
       }else{                  /* Insert a row */
-        fprintf(out, "INSERT INTO %s(%s", zId, az2[0]);
+        fprintf(out, "%sINSERT INTO %s(%s", zLead, zId, az2[0]);
         for(i=1; az2[i]; i++) fprintf(out, ",%s", az2[i]);
         fprintf(out, ") VALUES");
         zSep = "(";
@@ -700,10 +748,10 @@ static void diff_one_table(const char *zTab, FILE *out){
 
   /* Create indexes that are missing in the source */
   pStmt = db_prepare(
-    "SELECT sql FROM aux.sqlite_master"
+    "SELECT sql FROM aux.sqlite_schema"
     " WHERE type='index' AND tbl_name=%Q"
     "   AND sql IS NOT NULL"
-    "   AND sql NOT IN (SELECT sql FROM main.sqlite_master"
+    "   AND sql NOT IN (SELECT sql FROM main.sqlite_schema"
     "                    WHERE type='index' AND tbl_name=%Q"
     "                      AND sql IS NOT NULL)",
     zTab, zTab);
@@ -728,7 +776,7 @@ end_diff_one_table:
 */
 static void checkSchemasMatch(const char *zTab){
   sqlite3_stmt *pStmt = db_prepare(
-      "SELECT A.sql=B.sql FROM main.sqlite_master A, aux.sqlite_master B"
+      "SELECT A.sql=B.sql FROM main.sqlite_schema A, aux.sqlite_schema B"
       " WHERE A.name=%Q AND B.name=%Q", zTab, zTab
   );
   if( SQLITE_ROW==sqlite3_step(pStmt) ){
@@ -1544,6 +1592,7 @@ static void changeset_one_table(const char *zTab, FILE *out){
 
   /* Check that the schemas of the two tables match. Exit early otherwise. */
   checkSchemasMatch(zTab);
+  strInit(&sql);
 
   pStmt = db_prepare("PRAGMA main.table_info=%Q", zTab);
   while( SQLITE_ROW==sqlite3_step(pStmt) ){
@@ -1565,7 +1614,6 @@ static void changeset_one_table(const char *zTab, FILE *out){
   }
   sqlite3_finalize(pStmt);
   if( nPk==0 ) goto end_changeset_one_table; 
-  strInit(&sql);
   if( nCol>nPk ){
     strPrintf(&sql, "SELECT %d", SQLITE_UPDATE);
     for(i=0; i<nCol; i++){
@@ -1707,6 +1755,16 @@ end_changeset_one_table:
   sqlite3_free(azCol);
   sqlite3_free(aiPk);
   sqlite3_free(zId);
+  sqlite3_free(aiFlg);
+  strFree(&sql);
+}
+
+/*
+** Return true if the ascii character passed as the only argument is a
+** whitespace character. Otherwise return false.
+*/
+static int is_whitespace(char x){
+  return (x==' ' || x=='\t' || x=='\n' || x=='\r');
 }
 
 /*
@@ -1715,14 +1773,14 @@ end_changeset_one_table:
 ** Return a pointer to the character within zIn immediately following 
 ** the token or quoted string just extracted.
 */
-const char *gobble_token(const char *zIn, char *zBuf, int nBuf){
+static const char *gobble_token(const char *zIn, char *zBuf, int nBuf){
   const char *p = zIn;
   char *pOut = zBuf;
   char *pEnd = &pOut[nBuf-1];
   char q = 0;                     /* quote character, if any */
 
   if( p==0 ) return 0;
-  while( *p==' ' ) p++;
+  while( is_whitespace(*p) ) p++;
   switch( *p ){
     case '"': q = '"'; break;
     case '\'': q = '\''; break;
@@ -1741,7 +1799,7 @@ const char *gobble_token(const char *zIn, char *zBuf, int nBuf){
       p++;
     }
   }else{
-    while( *p && *p!=' ' && *p!='(' ){
+    while( *p && !is_whitespace(*p) && *p!='(' ){
       if( pOut<pEnd ) *pOut++ = *p;
       p++;
     }
@@ -1757,7 +1815,7 @@ const char *gobble_token(const char *zIn, char *zBuf, int nBuf){
 **   module_name(SQL)
 **
 ** The only argument should be an SQL statement of the type that may appear
-** in the sqlite_master table. If the statement is a "CREATE VIRTUAL TABLE"
+** in the sqlite_schema table. If the statement is a "CREATE VIRTUAL TABLE"
 ** statement, then the value returned is the name of the module that it
 ** uses. Otherwise, if the statement is not a CVT, NULL is returned.
 */
@@ -1816,32 +1874,32 @@ const char *all_tables_sql(){
     assert( rc==SQLITE_OK );
   
     return 
-      "SELECT name FROM main.sqlite_master\n"
+      "SELECT name FROM main.sqlite_schema\n"
       " WHERE type='table' AND (\n"
       "    module_name(sql) IS NULL OR \n"
       "    module_name(sql) IN (SELECT module FROM temp.tblmap)\n"
       " ) AND name NOT IN (\n"
       "  SELECT a.name || b.postfix \n"
-        "FROM main.sqlite_master AS a, temp.tblmap AS b \n"
+        "FROM main.sqlite_schema AS a, temp.tblmap AS b \n"
         "WHERE module_name(a.sql) = b.module\n" 
       " )\n"
       "UNION \n"
-      "SELECT name FROM aux.sqlite_master\n"
+      "SELECT name FROM aux.sqlite_schema\n"
       " WHERE type='table' AND (\n"
       "    module_name(sql) IS NULL OR \n"
       "    module_name(sql) IN (SELECT module FROM temp.tblmap)\n"
       " ) AND name NOT IN (\n"
       "  SELECT a.name || b.postfix \n"
-        "FROM aux.sqlite_master AS a, temp.tblmap AS b \n"
+        "FROM aux.sqlite_schema AS a, temp.tblmap AS b \n"
         "WHERE module_name(a.sql) = b.module\n" 
       " )\n"
       " ORDER BY name";
   }else{
     return
-      "SELECT name FROM main.sqlite_master\n"
+      "SELECT name FROM main.sqlite_schema\n"
       " WHERE type='table' AND sql NOT LIKE 'CREATE VIRTUAL%%'\n"
       " UNION\n"
-      "SELECT name FROM aux.sqlite_master\n"
+      "SELECT name FROM aux.sqlite_schema\n"
       " WHERE type='table' AND sql NOT LIKE 'CREATE VIRTUAL%%'\n"
       " ORDER BY name";
   }
@@ -1864,6 +1922,7 @@ static void showHelp(void){
 "  --table TAB           Show only differences in table TAB\n"
 "  --transaction         Show SQL output inside a transaction\n"
 "  --vtab                Handle fts3, fts4, fts5 and rtree tables\n"
+"See https://sqlite.org/sqldiff.html for detailed explanation.\n"
   );
 }
 
@@ -1930,6 +1989,9 @@ int main(int argc, char **argv){
       if( strcmp(z,"table")==0 ){
         if( i==argc-1 ) cmdlineError("missing argument to %s", argv[i]);
         zTab = argv[++i];
+        g.bSchemaCompare =
+          sqlite3_stricmp(zTab, "sqlite_schema")==0
+          || sqlite3_stricmp(zTab, "sqlite_master")==0;
       }else
       if( strcmp(z,"transaction")==0 ){
         useTransaction = 1;
@@ -1951,11 +2013,14 @@ int main(int argc, char **argv){
   if( zDb2==0 ){
     cmdlineError("two database arguments required");
   }
+  if( g.bSchemaOnly && g.bSchemaCompare ){
+    cmdlineError("The --schema option is useless with --table %s .", zTab);
+  }
   rc = sqlite3_open(zDb1, &g.db);
   if( rc ){
     cmdlineError("cannot open database file \"%s\"", zDb1);
   }
-  rc = sqlite3_exec(g.db, "SELECT * FROM sqlite_master", 0, 0, &zErrMsg);
+  rc = sqlite3_exec(g.db, "SELECT * FROM sqlite_schema", 0, 0, &zErrMsg);
   if( rc || zErrMsg ){
     cmdlineError("\"%s\" does not appear to be a valid SQLite database", zDb1);
   }
@@ -1971,10 +2036,12 @@ int main(int argc, char **argv){
 #endif
   zSql = sqlite3_mprintf("ATTACH %Q as aux;", zDb2);
   rc = sqlite3_exec(g.db, zSql, 0, 0, &zErrMsg);
+  sqlite3_free(zSql);
+  zSql = 0;
   if( rc || zErrMsg ){
     cmdlineError("cannot attach database \"%s\"", zDb2);
   }
-  rc = sqlite3_exec(g.db, "SELECT * FROM aux.sqlite_master", 0, 0, &zErrMsg);
+  rc = sqlite3_exec(g.db, "SELECT * FROM aux.sqlite_schema", 0, 0, &zErrMsg);
   if( rc || zErrMsg ){
     cmdlineError("\"%s\" does not appear to be a valid SQLite database", zDb2);
   }
